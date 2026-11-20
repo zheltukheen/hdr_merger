@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/hdr-core", "crates/hdr-cli", "crates/hdr-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/zheltukheen/hdr_merger"
+
+[workspace.dependencies]
+hdr-core = { path = "crates/hdr-core" }
+anyhow = "1"
+thiserror = "2"
+image = { version = "0.25", default-features = false, features = ["tiff", "png", "jpeg", "exr"] }
+rustfft = "6"
+rayon = "1"
+half = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

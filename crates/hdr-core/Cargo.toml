@@ -1,0 +1,19 @@
+[package]
+name = "hdr-core"
+description = "Headless HDR/light-paint stacking engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+image.workspace = true
+rustfft.workspace = true
+rayon.workspace = true
+half.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
