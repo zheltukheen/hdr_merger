@@ -7,6 +7,7 @@ mod app;
 mod canvas;
 mod meta;
 mod panels;
+mod settings;
 mod theme;
 
 use eframe::egui;
@@ -63,6 +64,12 @@ impl App {
     /// The whole window. Kept free of `eframe::Frame` so it can be driven from
     /// a headless `egui::Context` in tests.
     pub fn ui(&mut self, ctx: &egui::Context) {
+        if !self.update_checked {
+            self.update_checked = true;
+            if self.settings.check_updates {
+                self.start_update_check();
+            }
+        }
         self.take_dropped(ctx);
         self.poll(ctx);
         self.ensure_texture(ctx);
@@ -97,7 +104,136 @@ impl App {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(color::BG))
             .show(ctx, |ui| canvas::central(self, ui));
+
+        self.windows(ctx);
     }
+
+    fn windows(&mut self, ctx: &egui::Context) {
+        settings_window(self, ctx);
+        help_window(self, ctx);
+    }
+}
+
+fn settings_window(app: &mut App, ctx: &egui::Context) {
+    let mut open = app.show_settings;
+    egui::Window::new("Settings")
+        .open(&mut open)
+        .resizable(false)
+        .default_width(420.0)
+        .show(ctx, |ui| {
+            theme::section(ui, "Appearance");
+            ui.horizontal(|ui| {
+                ui.label("Theme");
+                ui.selectable_value(
+                    &mut app.settings.theme,
+                    crate::settings::Theme::Dark,
+                    "Dark",
+                );
+                ui.selectable_value(
+                    &mut app.settings.theme,
+                    crate::settings::Theme::Light,
+                    "Light",
+                );
+            });
+
+            theme::section(ui, "Performance");
+            theme::control_row(ui, "Preview proxy", |ui| {
+                egui::ComboBox::from_id_salt("settings-proxy")
+                    .selected_text(if app.settings.proxy == 0 {
+                        "Full".to_owned()
+                    } else {
+                        format!("{} px", app.settings.proxy)
+                    })
+                    .show_ui(ui, |ui| {
+                        for choice in app::PROXY_CHOICES {
+                            let label = if choice == 0 {
+                                "Full".to_owned()
+                            } else {
+                                format!("{choice} px")
+                            };
+                            ui.selectable_value(&mut app.settings.proxy, choice, label);
+                        }
+                    });
+            });
+
+            theme::section(ui, "Export defaults");
+            theme::control_row(ui, "JPEG quality", |ui| {
+                let mut quality = app.settings.jpeg_quality as f32;
+                theme::slider(ui, &mut quality, 1.0..=100.0, "");
+                app.settings.jpeg_quality = quality.clamp(1.0, 100.0) as u8;
+            });
+
+            theme::section(ui, "Updates");
+            ui.checkbox(&mut app.settings.check_updates, "check on startup");
+            ui.horizontal(|ui| {
+                if theme::ghost_button(ui, "Check now").clicked() {
+                    app.start_update_check();
+                }
+                let text = match &app.update {
+                    crate::settings::UpdateStatus::Idle => "not checked".to_owned(),
+                    crate::settings::UpdateStatus::Checking => "checking…".to_owned(),
+                    crate::settings::UpdateStatus::UpToDate => "up to date".to_owned(),
+                    crate::settings::UpdateStatus::Available { version, .. } => {
+                        format!("{version} available")
+                    }
+                    crate::settings::UpdateStatus::Failed(error) => format!("failed: {error}"),
+                };
+                ui.label(egui::RichText::new(text).size(11.0).color(color::TEXT_DIM));
+            });
+
+            ui.add_space(theme::SP_M);
+            ui.horizontal(|ui| {
+                if theme::primary_button(ui, "Save").clicked() {
+                    app.apply_settings(ctx);
+                }
+                if theme::ghost_button(ui, "Cancel").clicked() {
+                    app.show_settings = false;
+                }
+            });
+        });
+    app.show_settings = open;
+}
+
+fn help_window(app: &mut App, ctx: &egui::Context) {
+    let mut open = app.show_help;
+    egui::Window::new(crate::settings::HELP_TITLE)
+        .open(&mut open)
+        .resizable(true)
+        .default_width(520.0)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(520.0)
+                .show(ui, |ui| {
+                    for (title, body) in crate::settings::HELP_STEPS {
+                        theme::section(ui, title);
+                        ui.label(egui::RichText::new(*body).size(12.0).color(color::TEXT_DIM));
+                    }
+                    theme::section(ui, "Shortcuts");
+                    egui::Grid::new("shortcuts")
+                        .num_columns(2)
+                        .spacing([16.0, 4.0])
+                        .show(ui, |ui| {
+                            for (keys, action) in crate::settings::HELP_SHORTCUTS {
+                                ui.label(egui::RichText::new(*keys).monospace().size(11.0));
+                                ui.label(
+                                    egui::RichText::new(*action)
+                                        .size(11.0)
+                                        .color(color::TEXT_DIM),
+                                );
+                                ui.end_row();
+                            }
+                        });
+                    ui.add_space(theme::SP_M);
+                    ui.horizontal(|ui| {
+                        ui.hyperlink_to("Repository", "https://github.com/zheltukheen/hdr_merger");
+                        ui.hyperlink_to(
+                            "Releases",
+                            "https://github.com/zheltukheen/hdr_merger/releases",
+                        );
+                    });
+                });
+        });
+    app.show_help = open;
 }
 
 fn top_bar(app: &mut App, ctx: &egui::Context) {
@@ -153,6 +289,15 @@ fn top_bar(app: &mut App, ctx: &egui::Context) {
                         && theme::ghost_button(ui, "Re-preview").clicked()
                     {
                         app.start_preview();
+                    }
+                    if let crate::settings::UpdateStatus::Available { version, .. } = &app.update {
+                        theme::badge(ui, &format!("{version} available"), color::OK);
+                    }
+                    if theme::icon_button(ui, "?", "Help").clicked() {
+                        app.show_help = true;
+                    }
+                    if theme::icon_button(ui, "⚙", "Settings").clicked() {
+                        app.show_settings = true;
                     }
                 });
             });

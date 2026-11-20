@@ -26,7 +26,7 @@ pub fn left_panel(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn sources(app: &mut App, ui: &mut egui::Ui) {
-    theme::section(ui, "Sources");
+    theme::step_header(ui, 1, "Sources", &format!("{} frames", app.frames.len()));
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut app.recipe_path)
@@ -148,9 +148,20 @@ fn sources(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn stack(app: &mut App, ui: &mut egui::Ui) {
-    theme::section(ui, "Stack");
+    let proxy = if app.proxy == 0 {
+        "full".to_owned()
+    } else {
+        format!("{} px", app.proxy)
+    };
+    theme::step_header(
+        ui,
+        2,
+        "Stack",
+        &format!("{} · {}", app.method.label(), proxy),
+    );
 
     for choice in [
+        MethodChoice::Focus,
         MethodChoice::Median,
         MethodChoice::Percentile,
         MethodChoice::TrimmedMax,
@@ -244,7 +255,7 @@ fn stack(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn masks(app: &mut App, ui: &mut egui::Ui) {
-    theme::section(ui, "Masks");
+    theme::step_header(ui, 3, "Masks", &format!("{} masked", app.masked_frames()));
     ui.horizontal(|ui| {
         for (tool, label) in [
             (Tool::Inspect, "Inspect"),
@@ -291,7 +302,17 @@ fn masks(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn tone(app: &mut App, ui: &mut egui::Ui) {
-    theme::section(ui, "Tone map");
+    let exposure = app
+        .preview
+        .as_ref()
+        .map(|preview| format!("{:.1} EV", preview.exposure_ev))
+        .unwrap_or_else(|| "auto".to_owned());
+    theme::step_header(
+        ui,
+        4,
+        "Tone map",
+        &format!("{} · {exposure}", app.curve.label()),
+    );
     theme::hint(ui, "Display only. The EXR master stays linear.");
 
     theme::control_row(ui, "Preset", |ui| {
@@ -404,7 +425,13 @@ fn tone(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn export(app: &mut App, ui: &mut egui::Ui) {
-    theme::section(ui, "Export");
+    let format = std::path::Path::new(app.out_path.trim())
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_uppercase())
+        .unwrap_or_else(|| "EXR".to_owned());
+    theme::step_header(ui, 5, "Export", &format);
+
     ui.add(
         egui::TextEdit::singleline(&mut app.out_path)
             .hint_text("out.exr / out.tif / out.jpg")

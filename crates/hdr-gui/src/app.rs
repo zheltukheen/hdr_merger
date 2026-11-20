@@ -17,9 +17,9 @@ use hdr_core::{
 };
 
 use crate::meta::{self, Meta};
+use crate::settings::{Settings, Theme, UpdateStatus};
 use crate::theme;
 
-pub const PREVIEW_EDGE: u32 = 1400;
 pub const PROXY_CHOICES: [u32; 4] = [1000, 1400, 2000, 0];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -30,6 +30,7 @@ pub enum SortBy {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MethodChoice {
+    Focus,
     Median,
     Percentile,
     TrimmedMax,
@@ -41,6 +42,7 @@ pub enum MethodChoice {
 impl MethodChoice {
     pub fn label(self) -> &'static str {
         match self {
+            MethodChoice::Focus => "Focus stack",
             MethodChoice::Median => "Median",
             MethodChoice::Percentile => "Percentile",
             MethodChoice::TrimmedMax => "Trimmed max",
@@ -52,6 +54,7 @@ impl MethodChoice {
 
     pub fn hint(self) -> &'static str {
         match self {
+            MethodChoice::Focus => "Per pixel, keep the sharpest frame. For focus brackets.",
             MethodChoice::Median => "Removes anything that moved. The safe default.",
             MethodChoice::Percentile => "Keeps the strongest stable contribution per pixel.",
             MethodChoice::TrimmedMax => "Brightest value after dropping the top N.",
@@ -219,6 +222,15 @@ impl Frame {
     }
 }
 
+struct LayersJob {
+    out: PathBuf,
+    inputs: Vec<FrameInput>,
+    tonemap: ToneMapOptions,
+    auto: bool,
+    target: f32,
+    edge: Option<u32>,
+}
+
 pub struct Preview {
     pub image: hdr_core::LinearImage,
     pub display: Vec<u8>,
@@ -232,6 +244,7 @@ pub struct Preview {
 pub enum JobKind {
     Preview,
     Export,
+    Layers,
     Deghost,
 }
 
@@ -305,6 +318,12 @@ pub struct App {
     pub view_fit: bool,
     pub view_offset: egui::Vec2,
 
+    pub settings: Settings,
+    pub show_settings: bool,
+    pub show_help: bool,
+    pub update: UpdateStatus,
+    pub update_checked: bool,
+    update_rx: Option<std::sync::mpsc::Receiver<UpdateStatus>>,
     pub status: String,
     pub status_level: StatusLevel,
     pub progress: (u32, u32),
@@ -320,6 +339,8 @@ impl App {
     /// exercised headlessly in tests.
     pub fn with_context(ctx: &egui::Context) -> Self {
         theme::install(ctx);
+        let settings = Settings::load();
+        theme::set_dark(ctx, settings.theme == Theme::Dark);
         Self {
             frames: Vec::new(),
             selected: 0,
@@ -332,14 +353,14 @@ impl App {
             shift_guard: false,
             max_shift: 50,
             crop: true,
-            proxy: PREVIEW_EDGE,
+            proxy: settings.proxy,
             input_encoding: InputEncoding::Auto,
             curve: CurveChoice::Aces,
             tone: ToneControls::default(),
             preset: Preset::Neutral,
             undo: Vec::new(),
             redo: Vec::new(),
-            jpeg_quality: 92,
+            jpeg_quality: settings.jpeg_quality,
             inspect: None,
             auto_exposure: true,
             exposure_ev: 0.0,
@@ -362,6 +383,12 @@ impl App {
             view_zoom: 1.0,
             view_fit: true,
             view_offset: egui::Vec2::ZERO,
+            settings: settings.clone(),
+            show_settings: false,
+            show_help: false,
+            update: UpdateStatus::Idle,
+            update_checked: false,
+            update_rx: None,
             status: "Drop a folder or add frames to begin".to_owned(),
             status_level: StatusLevel::Info,
             progress: (0, 0),
@@ -379,6 +406,7 @@ impl App {
         match self.job.as_ref().map(|j| &j.kind) {
             Some(JobKind::Preview) => "Preview",
             Some(JobKind::Export) => "Export",
+            Some(JobKind::Layers) => "Layers",
             Some(JobKind::Deghost) => "Detect movers",
             None => "",
         }
@@ -395,6 +423,7 @@ impl App {
 
     pub fn stack_method(&self) -> StackMethod {
         match self.method {
+            MethodChoice::Focus => StackMethod::Focus,
             MethodChoice::Median => StackMethod::Median,
             MethodChoice::Percentile => StackMethod::Percentile(self.percentile.clamp(1.0, 99.0)),
             MethodChoice::TrimmedMax => StackMethod::TrimmedMax(self.trimmed as usize),
@@ -638,6 +667,31 @@ impl App {
         let controls = self.tone.clone();
         let edge = self.out_edge_on.then_some(self.out_edge);
         let quality = self.jpeg_quality;
+        let layers = matches!(
+            out.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase())
+                .as_deref(),
+            Some("psd") | Some("psb")
+        );
+        if layers {
+            let mut tonemap = ToneMapOptions {
+                exposure_ev: ev,
+                curve: self.curve.curve(),
+                srgb: true,
+                ..Default::default()
+            };
+            controls.apply(&mut tonemap);
+            self.start_layers_export(LayersJob {
+                out,
+                inputs,
+                tonemap,
+                auto,
+                target,
+                edge,
+            });
+            return;
+        }
         self.set_status(StatusLevel::Busy, "exporting full resolution…");
         self.spawn(JobKind::Export, move |tx| {
             let result = hdr_core::merge(&inputs, &options, &|done, total| {
@@ -677,7 +731,43 @@ impl App {
         });
     }
 
+    fn start_layers_export(&mut self, job: LayersJob) {
+        let LayersJob {
+            out,
+            inputs,
+            tonemap,
+            auto,
+            target,
+            edge,
+        } = job;
+        self.set_status(StatusLevel::Busy, "writing layers…");
+        self.spawn(JobKind::Layers, move |tx| {
+            let mut tonemap = tonemap;
+            if auto {
+                match hdr_core::layers::auto_exposure(&inputs, target) {
+                    Ok(value) => tonemap.exposure_ev = value,
+                    Err(error) => {
+                        let _ = tx.send(JobMsg::Failed(error.to_string()));
+                        return;
+                    }
+                }
+            }
+            let result = hdr_core::layers::export(&out, &inputs, &tonemap, edge, &|done, total| {
+                let _ = tx.send(JobMsg::Progress(done, total));
+            });
+            match result {
+                Ok(()) => {
+                    let _ = tx.send(JobMsg::Exported(out));
+                }
+                Err(error) => {
+                    let _ = tx.send(JobMsg::Failed(error.to_string()));
+                }
+            }
+        });
+    }
+
     pub fn poll(&mut self, ctx: &egui::Context) {
+        self.poll_update();
         let mut messages = Vec::new();
         if let Some(job) = &self.job {
             while let Ok(message) = job.rx.try_recv() {
@@ -768,6 +858,38 @@ impl App {
         let color = egui::ColorImage::from_rgb(size, &preview.display);
         self.texture = Some(ctx.load_texture("preview", color, egui::TextureOptions::LINEAR));
         self.histogram = Some(histogram(&preview.display));
+    }
+
+    // ---- settings and updates -----------------------------------------
+
+    pub fn start_update_check(&mut self) {
+        if matches!(self.update, UpdateStatus::Checking) {
+            return;
+        }
+        self.update = UpdateStatus::Checking;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        thread::spawn(move || {
+            let _ = tx.send(crate::settings::check_latest());
+        });
+    }
+
+    fn poll_update(&mut self) {
+        let Some(rx) = &self.update_rx else { return };
+        if let Ok(status) = rx.try_recv() {
+            self.update = status;
+            self.update_rx = None;
+        }
+    }
+
+    pub fn apply_settings(&mut self, ctx: &egui::Context) {
+        theme::set_dark(ctx, self.settings.theme == Theme::Dark);
+        self.proxy = self.settings.proxy;
+        self.jpeg_quality = self.settings.jpeg_quality;
+        match self.settings.save() {
+            Ok(()) => self.set_status(StatusLevel::Ok, "settings saved"),
+            Err(error) => self.set_status(StatusLevel::Error, error),
+        }
     }
 
     // ---- undo / redo ---------------------------------------------------
@@ -947,6 +1069,7 @@ impl App {
         self.max_shift = recipe.stack.max_shift.unwrap_or(self.max_shift);
         self.input_encoding = recipe.stack.input_encoding;
         self.method = match recipe.stack.method {
+            StackMethod::Focus => MethodChoice::Focus,
             StackMethod::Median => MethodChoice::Median,
             StackMethod::Percentile(_) => MethodChoice::Percentile,
             StackMethod::TrimmedMax(_) => MethodChoice::TrimmedMax,

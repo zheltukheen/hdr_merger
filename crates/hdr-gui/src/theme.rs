@@ -35,6 +35,42 @@ pub mod color {
 }
 
 /// Install the app-wide look. Called once at startup and again on theme flip.
+pub fn set_dark(ctx: &egui::Context, dark: bool) {
+    let mut style = (*ctx.style()).clone();
+    style.visuals = if dark { visuals() } else { light_visuals() };
+    ctx.set_style(style);
+}
+
+fn light_visuals() -> egui::Visuals {
+    let mut v = egui::Visuals::light();
+    v.panel_fill = Color32::from_rgb(244, 245, 247);
+    v.window_fill = Color32::from_rgb(250, 250, 252);
+    v.extreme_bg_color = Color32::from_rgb(232, 233, 236);
+    v.faint_bg_color = Color32::from_rgb(238, 239, 242);
+    v.override_text_color = Some(Color32::from_rgb(32, 33, 36));
+    v.selection.bg_fill = Color32::from_rgb(198, 222, 255);
+    v.selection.stroke = Stroke::new(1.0_f32, color::ACCENT);
+    v.window_stroke = Stroke::new(1.0_f32, Color32::from_rgb(210, 212, 216));
+    v.window_rounding = RADIUS.into();
+    for widget in [
+        &mut v.widgets.noninteractive,
+        &mut v.widgets.inactive,
+        &mut v.widgets.hovered,
+        &mut v.widgets.active,
+        &mut v.widgets.open,
+    ] {
+        widget.rounding = RADIUS.into();
+    }
+    v.widgets.noninteractive.bg_fill = Color32::from_rgb(244, 245, 247);
+    v.widgets.inactive.bg_fill = Color32::from_rgb(236, 237, 240);
+    v.widgets.inactive.weak_bg_fill = Color32::from_rgb(236, 237, 240);
+    v.widgets.hovered.bg_fill = Color32::from_rgb(226, 228, 233);
+    v.widgets.hovered.weak_bg_fill = Color32::from_rgb(226, 228, 233);
+    v.widgets.active.bg_fill = Color32::from_rgb(198, 222, 255);
+    v.widgets.active.weak_bg_fill = Color32::from_rgb(198, 222, 255);
+    v
+}
+
 pub fn install(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = Vec2::new(SP_S, SP_S);
@@ -102,6 +138,41 @@ pub fn section(ui: &mut egui::Ui, title: &str) {
         );
     });
     ui.add_space(SP_XS);
+}
+
+/// Numbered, ruled header for a workflow step: badge, title, right-aligned
+/// summary of the current state, hairline under it.
+pub fn step_header(ui: &mut egui::Ui, step: u32, title: &str, summary: &str) {
+    ui.add_space(SP_L);
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(20.0, 20.0), egui::Sense::hover());
+        ui.painter()
+            .circle_filled(rect.center(), 9.0, color::ACCENT_DIM);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            step.to_string(),
+            egui::FontId::proportional(10.5),
+            color::TEXT,
+        );
+        ui.add_space(SP_XS);
+        ui.label(
+            RichText::new(title.to_uppercase())
+                .size(11.0)
+                .strong()
+                .color(color::TEXT),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if !summary.is_empty() {
+                ui.label(RichText::new(summary).size(10.0).color(color::TEXT_DIM));
+            }
+        });
+    });
+    ui.add_space(SP_XS);
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, color::STROKE);
+    ui.add_space(SP_S);
 }
 
 pub fn hint(ui: &mut egui::Ui, text: impl Into<String>) {
