@@ -68,6 +68,45 @@ impl StackMethod {
         }
     }
 
+    /// Same answer as [`StackMethod::pick_sorted`] but on an unsorted, mutable
+    /// slice: selection instead of a full sort. This is the hot path — 60 MP
+    /// times three channels times N frames — and a full sort there costs ~4x
+    /// more comparisons than the order statistic actually needs.
+    pub fn pick_unsorted(&self, values: &mut [f32]) -> f32 {
+        let n = values.len();
+        if n == 0 {
+            return 0.0;
+        }
+        match *self {
+            StackMethod::Sum => values.iter().sum(),
+            StackMethod::Mean => values.iter().sum::<f32>() / n as f32,
+            StackMethod::Max => values.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+            StackMethod::Median => {
+                let mid = n / 2;
+                values.select_nth_unstable_by(mid, f32::total_cmp);
+                if n % 2 == 1 {
+                    values[mid]
+                } else {
+                    let lower = values[..mid]
+                        .iter()
+                        .copied()
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    0.5 * (lower + values[mid])
+                }
+            }
+            StackMethod::Percentile(p) => {
+                let index = (((p / 100.0) * (n as f32 - 1.0)).round() as usize).min(n - 1);
+                values.select_nth_unstable_by(index, f32::total_cmp);
+                values[index]
+            }
+            StackMethod::TrimmedMax(drop) => {
+                let index = n - 1 - drop.min(n - 1);
+                values.select_nth_unstable_by(index, f32::total_cmp);
+                values[index]
+            }
+        }
+    }
+
     /// Pick one value out of the ascending-sorted frame values.
     pub fn pick_sorted(&self, sorted: &[f32]) -> f32 {
         let n = sorted.len();
@@ -154,6 +193,38 @@ mod tests {
         );
         assert!(StackMethod::parse("bogus").is_err());
         assert!(StackMethod::parse("p101").is_err());
+    }
+
+    #[test]
+    fn selection_matches_sorting_for_every_method() {
+        let base: Vec<f32> = (0..41).map(|v| ((v * 37) % 41) as f32 * 0.25).collect();
+        let mut rng = 12345u32;
+        let mut noisy = base.clone();
+        for value in noisy.iter_mut() {
+            rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *value += ((rng >> 16) as f32 / 65535.0) * 0.01;
+        }
+        for method in [
+            StackMethod::Sum,
+            StackMethod::Mean,
+            StackMethod::Median,
+            StackMethod::Max,
+            StackMethod::Percentile(10.0),
+            StackMethod::Percentile(90.0),
+            StackMethod::TrimmedMax(3),
+        ] {
+            for values in [base.clone(), noisy.clone()] {
+                let mut sorted = values.clone();
+                sorted.sort_by(f32::total_cmp);
+                let mut unsorted = values.clone();
+                let expected = method.pick_sorted(&sorted);
+                let got = method.pick_unsorted(&mut unsorted);
+                assert!(
+                    (expected - got).abs() < 1e-5,
+                    "{method:?}: sorted {expected} vs selection {got}"
+                );
+            }
+        }
     }
 
     #[test]

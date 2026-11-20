@@ -81,9 +81,18 @@ same master EXR and different display outputs.
 
 ## v0.5 — performance and platform
 
-- [ ] SIMD percentile (sort-free selection for fixed N)
-- [ ] Optional GPU stack (wgpu) behind a feature flag
+Measured baseline (43 × 5496×3670, M1 Pro): decode 2.5 s, cache 3.9 s, stack
+9.1 s median. The stack is the biggest phase, so it gets the GPU first.
+
+- [x] Sort-free selection in the stacker (order statistic instead of a full
+      sort): median 11.4 s → 9.1 s, p90 18.1 s → 10.0 s
+- [ ] **GPU stack (wgpu compute) as the default**, CPU fallback when there is no
+      adapter or `HDR_MERGER_GPU=0`. Ships only if it beats 4.5 s on the set
+      above with byte-parity — see [docs/adr/0002-gpu-stacking.md](docs/adr/0002-gpu-stacking.md)
+- [ ] Faster decode and cache: they are 33 % of the run and carry the same
+      weight as the stack once the GPU lands
 - [ ] Streaming EXR export (no full master in RAM)
+- [ ] SIMD selection for fixed N (CPU fallback path)
 - [ ] Signed/notarised macOS builds, Windows installer
 - [ ] UI localisation (en/ru)
 - [ ] Dark-frame subtraction (StarStaX parity) — backlog unless requested

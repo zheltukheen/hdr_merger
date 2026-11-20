@@ -89,12 +89,33 @@ impl Default for MergeOptions {
     }
 }
 
+/// Where the wall clock went. Reported by the CLI and shown in the UI, because
+/// "the stack is slow" is usually not the stack — it is the decode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MergeTimings {
+    pub decode_ms: u64,
+    pub cache_ms: u64,
+    pub stack_ms: u64,
+    pub total_ms: u64,
+}
+
+impl MergeTimings {
+    /// Share of the total spent before the stacker even starts.
+    pub fn decode_share(&self) -> f32 {
+        if self.total_ms == 0 {
+            return 0.0;
+        }
+        ((self.decode_ms + self.cache_ms) as f32 / self.total_ms as f32).clamp(0.0, 1.0)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MergeOutput {
     pub image: LinearImage,
     /// Per input frame, in input order.
     pub shifts: Vec<Shift>,
     pub warnings: Vec<String>,
+    pub timings: MergeTimings,
 }
 
 /// Merge `frames`. `progress(done, total)` is called once per decoded frame
@@ -111,6 +132,9 @@ pub fn merge(
     let mut order: Vec<usize> = (0..frames.len()).filter(|i| *i != reference).collect();
     order.insert(0, reference);
 
+    let started = std::time::Instant::now();
+    let mut decode_ns: u128 = 0;
+    let mut cache_ns: u128 = 0;
     let cache = Cache::new()?;
     let mut shifts = vec![Shift::identity(); frames.len()];
     let mut masks: Vec<Option<Mask>> = vec![None; frames.len()];
@@ -122,7 +146,9 @@ pub fn merge(
 
     for (step, &index) in order.iter().enumerate() {
         let frame = &frames[index];
+        let decode_started = std::time::Instant::now();
         let mut image = io::load(&frame.path, options.input_encoding)?;
+        decode_ns += decode_started.elapsed().as_nanos();
         if let Some(max_dim) = options.max_dim {
             image = image.fit_within(max_dim);
         }
@@ -189,13 +215,16 @@ pub fn merge(
             }
         });
         let path = cache.path(index);
+        let cache_started = std::time::Instant::now();
         write_cache(&path, &image, shift)?;
+        cache_ns += cache_started.elapsed().as_nanos();
         cache_paths[index] = Some(path);
         shifts[index] = shift;
         progress(step as u32 + 1, total);
     }
 
     let (width, height) = size.ok_or(HdrError::NoFrames)?;
+    let stack_started = std::time::Instant::now();
     let image = stack_cached(
         &cache_paths,
         &masks,
@@ -204,6 +233,7 @@ pub fn merge(
         options.method,
         progress,
     )?;
+    let stack_ns = stack_started.elapsed().as_nanos();
     let image = if options.crop_to_intersection {
         let (x0, y0, w, h) = intersection(&shifts, width, height)
             .ok_or_else(|| HdrError::Engine("crop left nothing: shifts exceed the frame".into()))?;
@@ -217,10 +247,17 @@ pub fn merge(
     } else {
         image
     };
+    let timings = MergeTimings {
+        decode_ms: (decode_ns / 1_000_000) as u64,
+        cache_ms: (cache_ns / 1_000_000) as u64,
+        stack_ms: (stack_ns / 1_000_000) as u64,
+        total_ms: started.elapsed().as_millis() as u64,
+    };
     Ok(MergeOutput {
         image,
         shifts,
         warnings,
+        timings,
     })
 }
 
@@ -357,8 +394,7 @@ fn stack_cached(
                         row_out[x * 3 + channel] = if values.is_empty() {
                             0.0
                         } else {
-                            values.sort_by(f32::total_cmp);
-                            method.pick_sorted(&values)
+                            method.pick_unsorted(&mut values)
                         };
                     }
                 }

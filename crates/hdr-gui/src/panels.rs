@@ -382,6 +382,13 @@ fn export(app: &mut App, ui: &mut egui::Ui) {
                 preview.image.width, preview.image.height, megapixels, preview.used
             ),
         );
+        theme::hint(
+            ui,
+            format!(
+                "decode {} ms · cache {} ms · stack {} ms",
+                preview.timings.decode_ms, preview.timings.cache_ms, preview.timings.stack_ms
+            ),
+        );
         for warning in preview.warnings.iter().take(3) {
             ui.label(RichText::new(warning).size(10.5).color(color::WARN));
         }

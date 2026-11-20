@@ -11,7 +11,9 @@ use eframe::egui;
 use egui::TextureHandle;
 use hdr_core::io::InputEncoding;
 use hdr_core::recipe::{ExportSettings, Recipe, RecipeFrame};
-use hdr_core::{Curve, FrameInput, Mask, MergeOptions, MergeOutput, StackMethod, ToneMapOptions};
+use hdr_core::{
+    Curve, FrameInput, Mask, MergeOptions, MergeOutput, MergeTimings, StackMethod, ToneMapOptions,
+};
 
 use crate::meta::{self, Meta};
 use crate::theme;
@@ -120,6 +122,7 @@ pub struct Preview {
     pub exposure_ev: f32,
     pub warnings: Vec<String>,
     pub used: usize,
+    pub timings: MergeTimings,
 }
 
 pub enum JobKind {
@@ -515,6 +518,7 @@ impl App {
                 JobMsg::Progress(done, total) => self.progress = (done, total),
                 JobMsg::Preview(output) => {
                     let used = output.shifts.len();
+                    let timings = output.timings;
                     self.preview = Some(Preview {
                         image: output.image,
                         display: Vec::new(),
@@ -522,8 +526,12 @@ impl App {
                         exposure_ev: 0.0,
                         warnings: output.warnings,
                         used,
+                        timings,
                     });
-                    self.set_status(StatusLevel::Ok, "preview ready");
+                    self.set_status(
+                        StatusLevel::Ok,
+                        format!("preview ready · {} ms", timings.total_ms),
+                    );
                     finished = true;
                 }
                 JobMsg::Exported(path) => {

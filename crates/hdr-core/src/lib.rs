@@ -18,7 +18,7 @@ pub use align::Shift;
 pub use error::{HdrError, Result};
 pub use image::LinearImage;
 pub use mask::Mask;
-pub use pipeline::{merge, merge_paths, FrameInput, MergeOptions, MergeOutput};
+pub use pipeline::{merge, merge_paths, FrameInput, MergeOptions, MergeOutput, MergeTimings};
 pub use recipe::{ExportSettings, Recipe, RecipeFrame, RECIPE_SCHEMA};
 pub use stack::StackMethod;
 pub use tonemap::{Curve, ToneMapOptions};

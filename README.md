@@ -89,6 +89,20 @@ dcraw_emu -4 -T -w -o 1 -q 3 photo.CR3     # -> photo.CR3.tiff, linear 16-bit
 Encoding is inferred per file: 8-bit means sRGB display values, 16-bit and
 32-bit float mean linear light. Override with `--input srgb|linear`.
 
+## Performance
+
+Measured on a 43-frame, 5496×3670 set (Apple M1 Pro, release build):
+
+| phase | time |
+| --- | --- |
+| decode (TIFF → linear) | 2.5 s |
+| cache (shift + f16) | 3.9 s |
+| stack (median) | 9.1 s |
+| **total** | **16.1 s** |
+
+The 1400 px preview of the same set takes 4.7 s, of which 2.3 s is decode.
+`hdr-merger merge` prints this breakdown after every run.
+
 ## Design
 
 * `crates/hdr-core` — the engine. Pure library, no UI, no globals.

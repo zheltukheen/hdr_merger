@@ -172,6 +172,7 @@ fn merge_command(args: MergeArgs) -> Result<()> {
     for warning in &merged.warnings {
         eprintln!("warning: {warning}");
     }
+    let timings = merged.timings;
     eprintln!(
         "stacked {} frame(s) with {} -> {}x{}, exposure {:.2} EV",
         frames.len(),
@@ -179,6 +180,14 @@ fn merge_command(args: MergeArgs) -> Result<()> {
         merged.image.width,
         merged.image.height,
         tonemap.exposure_ev
+    );
+    eprintln!(
+        "time: decode {} ms, cache {} ms, stack {} ms, total {} ms ({:.0}% before the stack)",
+        timings.decode_ms,
+        timings.cache_ms,
+        timings.stack_ms,
+        timings.total_ms,
+        timings.decode_share() * 100.0
     );
 
     hdr_core::io::save(&args.out, &merged.image, &tonemap)?;
