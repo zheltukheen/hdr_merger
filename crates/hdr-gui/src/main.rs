@@ -267,6 +267,40 @@ mod tests {
     }
 
     #[test]
+    fn preview_job_produces_a_texture_and_histogram() {
+        let dir = std::env::temp_dir().join("hdr-merger-gui-preview");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = sample_tiff(&dir, "a.tif");
+        let b = sample_tiff(&dir, "b.tif");
+
+        let ctx = test_ctx();
+        let mut app = App::with_context(&ctx);
+        app.add_paths(vec![a, b]);
+        app.auto_exposure = false;
+        app.exposure_ev = 4.0;
+        app.start_preview();
+
+        for _ in 0..300 {
+            render(&ctx, &mut app);
+            if app.preview.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            app.preview.is_some(),
+            "preview job never finished: {}",
+            app.status
+        );
+        render(&ctx, &mut app);
+        assert!(app.texture.is_some(), "preview texture was not built");
+        assert_eq!(app.histogram.as_ref().map(Vec::len), Some(64));
+        let preview = app.preview.as_ref().unwrap();
+        assert_eq!((preview.image.width, preview.image.height), (32, 24));
+    }
+
+    #[test]
     fn histogram_covers_every_pixel() {
         let pixels = vec![10u8, 20, 30, 200, 210, 220];
         let bins = app::histogram(&pixels);
