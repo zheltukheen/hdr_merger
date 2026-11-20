@@ -281,6 +281,7 @@ mod tests {
             exposure_ev: 1.25,
             curve: Curve::Hable,
             srgb: false,
+            ..Default::default()
         };
         Recipe {
             export: ExportSettings {

@@ -502,6 +502,7 @@ mod tests {
             curve: crate::tonemap::Curve::None,
             srgb: false,
             exposure_ev: 0.0,
+            ..Default::default()
         }
     }
 

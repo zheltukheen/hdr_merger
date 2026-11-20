@@ -23,6 +23,7 @@ fn linear_tonemap() -> ToneMapOptions {
         exposure_ev: 0.0,
         curve: Curve::None,
         srgb: false,
+        ..Default::default()
     }
 }
 

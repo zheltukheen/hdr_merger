@@ -202,6 +202,17 @@ fn from_f32(width: u32, height: u32, data: &[f32], channels: usize, srgb: bool) 
 /// Write whatever the extension says: `.exr` keeps linear float, everything
 /// else is tone mapped for display.
 pub fn save(path: &Path, image: &LinearImage, tonemap: &ToneMapOptions) -> Result<()> {
+    save_with_quality(path, image, tonemap, 92)
+}
+
+/// Same as [`save`] with an explicit JPEG quality (1..=100); ignored by other
+/// formats.
+pub fn save_with_quality(
+    path: &Path,
+    image: &LinearImage,
+    tonemap: &ToneMapOptions,
+    jpeg_quality: u8,
+) -> Result<()> {
     match output_format(path) {
         OutputFormat::Exr => save_exr(path, image),
         OutputFormat::Tiff16 => {
@@ -226,7 +237,10 @@ pub fn save(path: &Path, image: &LinearImage, tonemap: &ToneMapOptions) -> Resul
             let data = to_display8(image, tonemap);
             let file = File::create(path)?;
             let mut writer = BufWriter::new(file);
-            let mut encoder = ::image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, 92);
+            let mut encoder = ::image::codecs::jpeg::JpegEncoder::new_with_quality(
+                &mut writer,
+                jpeg_quality.clamp(1, 100),
+            );
             encoder
                 .encode(
                     &data,
@@ -281,6 +295,7 @@ mod tests {
             curve: Curve::None,
             srgb: false,
             exposure_ev: 0.0,
+            ..Default::default()
         };
         save(&path, &image, &linear).unwrap();
         let loaded = load(&path, InputEncoding::Linear).unwrap();

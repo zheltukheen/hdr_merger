@@ -108,6 +108,15 @@ pub fn hint(ui: &mut egui::Ui, text: impl Into<String>) {
     ui.label(RichText::new(text).size(11.0).color(color::TEXT_DIM));
 }
 
+/// Hairline separator between groups inside a section.
+pub fn divider(ui: &mut egui::Ui) {
+    ui.add_space(SP_S);
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0.0, color::STROKE);
+    ui.add_space(SP_S);
+}
+
 // ---- layout primitives --------------------------------------------------
 
 /// One labelled control row. Every setting in every panel goes through this,

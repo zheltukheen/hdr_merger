@@ -7,7 +7,7 @@ use eframe::egui;
 use egui::RichText;
 use hdr_core::io::InputEncoding;
 
-use crate::app::{App, CurveChoice, MethodChoice, SortBy, Tool, PROXY_CHOICES};
+use crate::app::{App, CurveChoice, MethodChoice, Preset, SortBy, Tool, PROXY_CHOICES};
 use crate::meta;
 use crate::theme::{self, color, SP_M, SP_S, SP_XS};
 
@@ -280,11 +280,40 @@ fn masks(app: &mut App, ui: &mut egui::Ui) {
         }
     });
     theme::hint(ui, format!("{} frame(s) masked", app.masked_frames()));
+    theme::divider(ui);
+    theme::hint(ui, "Auto-detect the moving subject on proxy copies.");
+    theme::control_row(ui, "Threshold", |ui| {
+        theme::slider(ui, &mut app.deghost_threshold, 0.02..=0.6, "");
+    });
+    if theme::ghost_button(ui, "Detect movers").clicked() {
+        app.start_deghost();
+    }
 }
 
 fn tone(app: &mut App, ui: &mut egui::Ui) {
     theme::section(ui, "Tone map");
     theme::hint(ui, "Display only. The EXR master stays linear.");
+
+    theme::control_row(ui, "Preset", |ui| {
+        egui::ComboBox::from_id_salt("preset")
+            .selected_text(app.active_preset().label())
+            .show_ui(ui, |ui| {
+                for preset in [
+                    Preset::Neutral,
+                    Preset::LightPaintInterior,
+                    Preset::NightExterior,
+                    Preset::BracketHdr,
+                ] {
+                    if ui
+                        .selectable_label(app.active_preset() == preset, preset.label())
+                        .clicked()
+                    {
+                        app.apply_preset(preset);
+                    }
+                }
+            });
+    });
+
     theme::control_row(ui, "Auto exposure", |ui| {
         ui.checkbox(&mut app.auto_exposure, "");
     });
@@ -304,6 +333,7 @@ fn tone(app: &mut App, ui: &mut egui::Ui) {
                 for choice in [
                     CurveChoice::Aces,
                     CurveChoice::Reinhard,
+                    CurveChoice::Reinhard02,
                     CurveChoice::Hable,
                     CurveChoice::None,
                 ] {
@@ -311,6 +341,52 @@ fn tone(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
     });
+
+    theme::divider(ui);
+    theme::hint(ui, "Levels");
+    theme::control_row(ui, "Black point", |ui| {
+        theme::slider(ui, &mut app.tone.black_point, 0.0..=0.5, "");
+    });
+    theme::control_row(ui, "White point", |ui| {
+        theme::slider(ui, &mut app.tone.white_point, 0.1..=4.0, "");
+    });
+    theme::control_row(ui, "Contrast", |ui| {
+        theme::slider(ui, &mut app.tone.contrast, -1.0..=1.0, "");
+    });
+    theme::control_row(ui, "Highlights", |ui| {
+        theme::slider(ui, &mut app.tone.highlights, -1.0..=1.0, "");
+    });
+    theme::control_row(ui, "Shadows", |ui| {
+        theme::slider(ui, &mut app.tone.shadows, -1.0..=1.0, "");
+    });
+
+    theme::divider(ui);
+    theme::hint(ui, "Colour");
+    theme::control_row(ui, "Saturation", |ui| {
+        theme::slider(ui, &mut app.tone.saturation, -1.0..=1.0, "");
+    });
+    theme::control_row(ui, "Temperature", |ui| {
+        theme::slider(ui, &mut app.tone.temperature, -1.0..=1.0, "");
+    });
+    theme::control_row(ui, "Tint", |ui| {
+        theme::slider(ui, &mut app.tone.tint, -1.0..=1.0, "");
+    });
+
+    theme::divider(ui);
+    theme::hint(ui, "Detail");
+    theme::control_row(ui, "Structure", |ui| {
+        theme::slider(ui, &mut app.tone.structure, 0.0..=1.0, "");
+    });
+    theme::control_row(ui, "Local lift", |ui| {
+        theme::slider(ui, &mut app.tone.local, 0.0..=1.0, "");
+    });
+    theme::control_row(ui, "Denoise", |ui| {
+        theme::slider(ui, &mut app.tone.denoise, 0.0..=1.0, "");
+    });
+    theme::control_row(ui, "Vignette", |ui| {
+        theme::slider(ui, &mut app.tone.vignette, -1.0..=1.0, "");
+    });
+
     if let Some(preview) = &app.preview {
         theme::hint(
             ui,
@@ -323,6 +399,7 @@ fn tone(app: &mut App, ui: &mut egui::Ui) {
         app.exposure_ev = 0.0;
         app.curve = CurveChoice::Aces;
         app.target = 0.55;
+        app.apply_preset(Preset::Neutral);
     }
 }
 
@@ -333,6 +410,11 @@ fn export(app: &mut App, ui: &mut egui::Ui) {
             .hint_text("out.exr / out.tif / out.jpg")
             .desired_width(f32::INFINITY),
     );
+    theme::control_row(ui, "JPEG quality", |ui| {
+        let mut quality = app.jpeg_quality as f32;
+        theme::slider(ui, &mut quality, 1.0..=100.0, "");
+        app.jpeg_quality = quality.clamp(1.0, 100.0) as u8;
+    });
     theme::control_row(ui, "Resize", |ui| {
         ui.checkbox(&mut app.out_edge_on, "long edge");
         ui.add_enabled_ui(app.out_edge_on, |ui| {

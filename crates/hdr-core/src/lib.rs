@@ -5,6 +5,7 @@
 
 pub mod align;
 pub mod color;
+pub mod deghost;
 pub mod error;
 #[cfg(feature = "gpu")]
 pub mod gpu;
@@ -17,6 +18,7 @@ pub mod stack;
 pub mod tonemap;
 
 pub use align::Shift;
+pub use deghost::{detect_movers, DeghostOptions, DeghostResult};
 pub use error::{HdrError, Result};
 pub use image::LinearImage;
 pub use mask::Mask;

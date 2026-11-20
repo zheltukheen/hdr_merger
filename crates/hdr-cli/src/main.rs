@@ -90,6 +90,14 @@ struct MergeArgs {
 }
 
 fn main() -> ExitCode {
+    // clap's `--version` cannot include a runtime constant, and the recipe
+    // schema is part of the contract (v1.0), so answer it explicitly.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.len() == 1 && (args[0] == "--version" || args[0] == "-V") {
+        println!("hdr-merger {}", env!("CARGO_PKG_VERSION"));
+        println!("recipe schema {}", hdr_core::recipe::RECIPE_SCHEMA);
+        return ExitCode::SUCCESS;
+    }
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -167,6 +175,7 @@ fn merge_command(args: MergeArgs) -> Result<()> {
         exposure_ev: 0.0,
         curve,
         srgb: true,
+        ..Default::default()
     };
     tonemap.exposure_ev = match args.exposure.as_str() {
         "auto" => hdr_core::tonemap::auto_exposure_ev(&merged.image, args.target),

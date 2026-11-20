@@ -96,10 +96,30 @@ fn interact(
     if !image_rect.contains(pointer) {
         return;
     }
+    if app.tool != Tool::Inspect && response.drag_started() {
+        app.begin_mask_edit();
+    }
     if app.tool != Tool::Inspect && response.dragged_by(egui::PointerButton::Primary) {
         paint(app, pointer, image_rect, ui.input(|i| i.modifiers.shift));
     }
-    if app.tool != Tool::Inspect {
+    if app.tool == Tool::Inspect {
+        if let Some(preview) = &app.preview {
+            let u = ((pointer.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
+            let v = ((pointer.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0);
+            let x = (u * preview.image.width as f32) as u32;
+            let y = (v * preview.image.height as f32) as u32;
+            let width = preview.image.width as usize;
+            let index = (y as usize * width + x as usize) * 3;
+            if let Some(pixel) = preview.display.get(index..index + 3) {
+                let value = [
+                    pixel[0] as f32 / 255.0,
+                    pixel[1] as f32 / 255.0,
+                    pixel[2] as f32 / 255.0,
+                ];
+                app.inspect = Some((x, y, value));
+            }
+        }
+    } else {
         let radius = (app.brush * scale).clamp(1.0, 400.0);
         ui.painter()
             .circle_stroke(pointer, radius, egui::Stroke::new(1.5_f32, color::ACCENT));
@@ -230,6 +250,12 @@ fn footer(app: &App, painter: &egui::Painter, rect: egui::Rect) {
     }
     if !app.view_fit {
         parts.push(format!("{:.0}%", app.view_zoom * 100.0));
+    }
+    if let Some((x, y, rgb)) = app.inspect {
+        parts.push(format!(
+            "x{x} y{y}  rgb {:.2} {:.2} {:.2}",
+            rgb[0], rgb[1], rgb[2]
+        ));
     }
     let text = parts.join("  ·  ");
     let position = rect.left_bottom() + egui::vec2(SP_M, -SP_M);

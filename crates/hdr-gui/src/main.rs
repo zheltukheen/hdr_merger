@@ -163,13 +163,14 @@ impl App {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let (keys, modifiers) = ctx.input(|i| (i.keys_down.clone(), i.modifiers));
         let pressed = |key: egui::Key| keys.contains(&key);
-        if pressed(egui::Key::B) {
+        let command = modifiers.command;
+        if !command && pressed(egui::Key::B) {
             self.tool = Tool::Brush;
         }
-        if pressed(egui::Key::E) {
+        if !command && pressed(egui::Key::E) {
             self.tool = Tool::Eraser;
         }
-        if pressed(egui::Key::I) {
+        if !command && pressed(egui::Key::I) {
             self.tool = Tool::Inspect;
         }
         if pressed(egui::Key::OpenBracket) {
@@ -187,8 +188,15 @@ impl App {
             self.view_fit = false;
             self.view_zoom = 1.0;
         }
-        if modifiers.command && ctx.input(|i| i.key_pressed(egui::Key::E)) {
+        if command && ctx.input(|i| i.key_pressed(egui::Key::E)) {
             self.start_export();
+        }
+        if command && ctx.input(|i| i.key_pressed(egui::Key::Z)) {
+            if modifiers.shift {
+                self.redo_mask();
+            } else {
+                self.undo_mask();
+            }
         }
         if modifiers.command && ctx.input(|i| i.key_pressed(egui::Key::S)) {
             self.save_recipe();
@@ -231,6 +239,7 @@ mod tests {
             exposure_ev: 0.0,
             curve: hdr_core::Curve::None,
             srgb: false,
+            ..Default::default()
         };
         hdr_core::io::save(&path, &image, &linear).expect("write fixture");
         path
@@ -321,6 +330,49 @@ mod tests {
         assert_eq!(app.histogram.as_ref().map(Vec::len), Some(64));
         let preview = app.preview.as_ref().unwrap();
         assert_eq!((preview.image.width, preview.image.height), (32, 24));
+    }
+
+    #[test]
+    fn a_preset_sets_tone_controls_and_marks_itself() {
+        let ctx = test_ctx();
+        let mut app = App::with_context(&ctx);
+        app.apply_preset(app::Preset::LightPaintInterior);
+        assert!(app.tone.contrast > 0.0);
+        assert!(app.tone.shadows > 0.0);
+        let options = app.tone_for_recipe();
+        assert!((options.contrast - app.tone.contrast).abs() < 1e-6);
+        assert_eq!(app.active_preset(), app::Preset::LightPaintInterior);
+        app.tone.saturation = 0.42;
+        assert_eq!(app.active_preset(), app::Preset::Custom);
+    }
+
+    #[test]
+    fn undo_restores_the_mask_from_before_the_stroke() {
+        let dir = std::env::temp_dir().join("hdr-merger-gui-undo");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = sample_tiff(&dir, "u.tif");
+
+        let ctx = test_ctx();
+        let mut app = App::with_context(&ctx);
+        app.add_paths(vec![path]);
+        app.selected = 0;
+
+        app.begin_mask_edit();
+        {
+            let mask = app.ensure_mask(0).expect("mask");
+            mask.paint_circle(10.0, 10.0, 3.0, 0.0, 255);
+        }
+        assert!(app.frames[0].masked());
+
+        app.undo_mask();
+        assert!(
+            !app.frames[0].masked(),
+            "undo did not restore an empty mask"
+        );
+
+        app.redo_mask();
+        assert!(app.frames[0].masked(), "redo did not bring the stroke back");
     }
 
     #[test]

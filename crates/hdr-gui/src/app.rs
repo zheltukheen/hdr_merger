@@ -9,6 +9,7 @@ use std::thread;
 
 use eframe::egui;
 use egui::TextureHandle;
+use hdr_core::deghost::{detect_movers, DeghostOptions};
 use hdr_core::io::InputEncoding;
 use hdr_core::recipe::{ExportSettings, Recipe, RecipeFrame};
 use hdr_core::{
@@ -65,6 +66,7 @@ impl MethodChoice {
 pub enum CurveChoice {
     Aces,
     Reinhard,
+    Reinhard02,
     Hable,
     None,
 }
@@ -74,6 +76,7 @@ impl CurveChoice {
         match self {
             CurveChoice::Aces => Curve::Aces,
             CurveChoice::Reinhard => Curve::Reinhard,
+            CurveChoice::Reinhard02 => Curve::Reinhard02,
             CurveChoice::Hable => Curve::Hable,
             CurveChoice::None => Curve::None,
         }
@@ -83,8 +86,101 @@ impl CurveChoice {
         match self {
             CurveChoice::Aces => "ACES",
             CurveChoice::Reinhard => "Reinhard",
+            CurveChoice::Reinhard02 => "Reinhard '02",
             CurveChoice::Hable => "Hable",
             CurveChoice::None => "Linear",
+        }
+    }
+}
+
+/// The tone-map knobs that are not exposure/curve. Mirrors the engine struct
+/// field for field so the panel can be generated from one place.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToneControls {
+    pub black_point: f32,
+    pub white_point: f32,
+    pub contrast: f32,
+    pub highlights: f32,
+    pub shadows: f32,
+    pub saturation: f32,
+    pub temperature: f32,
+    pub tint: f32,
+    pub structure: f32,
+    pub denoise: f32,
+    pub local: f32,
+    pub vignette: f32,
+}
+
+impl Default for ToneControls {
+    fn default() -> Self {
+        Self {
+            black_point: 0.0,
+            white_point: 1.0,
+            contrast: 0.0,
+            highlights: 0.0,
+            shadows: 0.0,
+            saturation: 0.0,
+            temperature: 0.0,
+            tint: 0.0,
+            structure: 0.0,
+            denoise: 0.0,
+            local: 0.0,
+            vignette: 0.0,
+        }
+    }
+}
+
+impl ToneControls {
+    fn apply(&self, options: &mut ToneMapOptions) {
+        options.black_point = self.black_point;
+        options.white_point = self.white_point;
+        options.contrast = self.contrast;
+        options.highlights = self.highlights;
+        options.shadows = self.shadows;
+        options.saturation = self.saturation;
+        options.temperature = self.temperature;
+        options.tint = self.tint;
+        options.structure = self.structure;
+        options.denoise = self.denoise;
+        options.local = self.local;
+        options.vignette = self.vignette;
+    }
+
+    fn from_options(options: &ToneMapOptions) -> Self {
+        Self {
+            black_point: options.black_point,
+            white_point: options.white_point,
+            contrast: options.contrast,
+            highlights: options.highlights,
+            shadows: options.shadows,
+            saturation: options.saturation,
+            temperature: options.temperature,
+            tint: options.tint,
+            structure: options.structure,
+            denoise: options.denoise,
+            local: options.local,
+            vignette: options.vignette,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset {
+    Custom,
+    Neutral,
+    LightPaintInterior,
+    NightExterior,
+    BracketHdr,
+}
+
+impl Preset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Preset::Custom => "Custom",
+            Preset::Neutral => "Neutral",
+            Preset::LightPaintInterior => "Light-paint interior",
+            Preset::NightExterior => "Night exterior",
+            Preset::BracketHdr => "Bracket HDR",
         }
     }
 }
@@ -94,6 +190,14 @@ pub enum Tool {
     Inspect,
     Brush,
     Eraser,
+}
+
+/// One undo step for mask painting. A full mask copy is 20 MB on a 60 MP
+/// frame, so the history is capped at 8 steps and 240 MB worth of snapshots.
+#[derive(Clone)]
+pub struct MaskSnapshot {
+    pub frame: usize,
+    pub mask: Option<Mask>,
 }
 
 pub struct Frame {
@@ -128,12 +232,14 @@ pub struct Preview {
 pub enum JobKind {
     Preview,
     Export,
+    Deghost,
 }
 
 pub enum JobMsg {
     Progress(u32, u32),
     Preview(Box<MergeOutput>),
     Exported(PathBuf),
+    Deghost(Vec<(usize, Option<Mask>)>),
     Failed(String),
 }
 
@@ -167,10 +273,17 @@ pub struct App {
     pub input_encoding: InputEncoding,
 
     pub curve: CurveChoice,
+    pub tone: ToneControls,
+    pub preset: Preset,
+    pub undo: Vec<MaskSnapshot>,
+    pub redo: Vec<MaskSnapshot>,
+    pub jpeg_quality: u8,
+    pub inspect: Option<(u32, u32, [f32; 3])>,
     pub auto_exposure: bool,
     pub exposure_ev: f32,
     pub target: f32,
 
+    pub deghost_threshold: f32,
     pub tool: Tool,
     pub brush: f32,
     pub softness: f32,
@@ -222,9 +335,16 @@ impl App {
             proxy: PREVIEW_EDGE,
             input_encoding: InputEncoding::Auto,
             curve: CurveChoice::Aces,
+            tone: ToneControls::default(),
+            preset: Preset::Neutral,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            jpeg_quality: 92,
+            inspect: None,
             auto_exposure: true,
             exposure_ev: 0.0,
             target: 0.55,
+            deghost_threshold: 0.15,
             tool: Tool::Inspect,
             brush: 28.0,
             softness: 0.35,
@@ -259,6 +379,7 @@ impl App {
         match self.job.as_ref().map(|j| &j.kind) {
             Some(JobKind::Preview) => "Preview",
             Some(JobKind::Export) => "Export",
+            Some(JobKind::Deghost) => "Detect movers",
             None => "",
         }
     }
@@ -302,11 +423,14 @@ impl App {
         } else {
             self.exposure_ev
         };
-        ToneMapOptions {
+        let mut options = ToneMapOptions {
             exposure_ev,
             curve: self.curve.curve(),
             srgb: true,
-        }
+            ..Default::default()
+        };
+        self.tone.apply(&mut options);
+        options
     }
 
     pub fn frame_inputs(&self) -> Vec<FrameInput> {
@@ -453,6 +577,49 @@ impl App {
         });
     }
 
+    /// Detect the moving subject on proxy copies and paint the masks for the
+    /// user. Runs on the worker thread; the result replaces masks frame by
+    /// frame, leaving anything the user painted in frames that stayed clean.
+    pub fn start_deghost(&mut self) {
+        if self.frames.is_empty() || self.busy() {
+            return;
+        }
+        let targets: Vec<(usize, PathBuf)> = self
+            .frames
+            .iter()
+            .enumerate()
+            .filter(|(_, frame)| frame.included)
+            .map(|(index, frame)| (index, frame.path.clone()))
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        let paths: Vec<PathBuf> = targets.iter().map(|(_, path)| path.clone()).collect();
+        let options = DeghostOptions {
+            threshold: self.deghost_threshold,
+            probe_edge: 1024,
+        };
+        self.set_status(StatusLevel::Busy, "looking for movers…");
+        self.spawn(JobKind::Deghost, move |tx| {
+            let result = detect_movers(&paths, &options, &|done, total| {
+                let _ = tx.send(JobMsg::Progress(done, total));
+            });
+            match result {
+                Ok(outcome) => {
+                    let pairs: Vec<(usize, Option<Mask>)> = targets
+                        .into_iter()
+                        .zip(outcome.masks)
+                        .map(|((index, _), mask)| (index, mask))
+                        .collect();
+                    let _ = tx.send(JobMsg::Deghost(pairs));
+                }
+                Err(error) => {
+                    let _ = tx.send(JobMsg::Failed(error.to_string()));
+                }
+            }
+        });
+    }
+
     pub fn start_export(&mut self) {
         if self.frames.is_empty() || self.busy() {
             return;
@@ -468,7 +635,9 @@ impl App {
         let ev = self.exposure_ev;
         let target = self.target;
         let curve = self.curve.curve();
+        let controls = self.tone.clone();
         let edge = self.out_edge_on.then_some(self.out_edge);
+        let quality = self.jpeg_quality;
         self.set_status(StatusLevel::Busy, "exporting full resolution…");
         self.spawn(JobKind::Export, move |tx| {
             let result = hdr_core::merge(&inputs, &options, &|done, total| {
@@ -490,12 +659,14 @@ impl App {
             } else {
                 ev
             };
-            let tonemap = ToneMapOptions {
+            let mut tonemap = ToneMapOptions {
                 exposure_ev,
                 curve,
                 srgb: true,
+                ..Default::default()
             };
-            match hdr_core::io::save(&out, &image, &tonemap) {
+            controls.apply(&mut tonemap);
+            match hdr_core::io::save_with_quality(&out, &image, &tonemap, quality) {
                 Ok(()) => {
                     let _ = tx.send(JobMsg::Exported(out));
                 }
@@ -532,6 +703,27 @@ impl App {
                     self.set_status(
                         StatusLevel::Ok,
                         format!("preview ready · {} ms", timings.total_ms),
+                    );
+                    finished = true;
+                }
+                JobMsg::Deghost(pairs) => {
+                    let mut applied = 0;
+                    for (index, mask) in pairs {
+                        if let Some(mask) = mask {
+                            if let Some(frame) = self.frames.get_mut(index) {
+                                frame.mask = Some(mask);
+                                applied += 1;
+                            }
+                        }
+                    }
+                    self.mask_overlay = None;
+                    self.mask_overlay_key = None;
+                    self.set_status(
+                        StatusLevel::Ok,
+                        match applied {
+                            0 => "no movers found — try a lower threshold".to_owned(),
+                            n => format!("{n} frame(s) masked, review before exporting"),
+                        },
                     );
                     finished = true;
                 }
@@ -578,6 +770,116 @@ impl App {
         self.histogram = Some(histogram(&preview.display));
     }
 
+    // ---- undo / redo ---------------------------------------------------
+
+    pub fn begin_mask_edit(&mut self) {
+        let Some(frame) = self.frames.get(self.selected) else {
+            return;
+        };
+        let snapshot = MaskSnapshot {
+            frame: self.selected,
+            mask: frame.mask.clone(),
+        };
+        self.undo.push(snapshot);
+        self.redo.clear();
+        while self.undo.len() > 8 {
+            self.undo.remove(0);
+        }
+    }
+
+    pub fn undo_mask(&mut self) {
+        let Some(snapshot) = self.undo.pop() else {
+            return;
+        };
+        let Some(frame) = self.frames.get_mut(snapshot.frame) else {
+            return;
+        };
+        self.redo.push(MaskSnapshot {
+            frame: snapshot.frame,
+            mask: frame.mask.clone(),
+        });
+        frame.mask = snapshot.mask;
+        self.mask_overlay = None;
+        self.mask_overlay_key = None;
+    }
+
+    pub fn redo_mask(&mut self) {
+        let Some(snapshot) = self.redo.pop() else {
+            return;
+        };
+        let Some(frame) = self.frames.get_mut(snapshot.frame) else {
+            return;
+        };
+        self.undo.push(MaskSnapshot {
+            frame: snapshot.frame,
+            mask: frame.mask.clone(),
+        });
+        frame.mask = snapshot.mask;
+        self.mask_overlay = None;
+        self.mask_overlay_key = None;
+    }
+
+    /// The tone controls a preset stands for. Comparing the live controls
+    /// against this is what decides between the preset name and "Custom", so
+    /// there is no separate dirty flag to forget to update.
+    pub fn preset_spec(preset: Preset) -> (ToneControls, CurveChoice) {
+        let mut tone = ToneControls::default();
+        let curve = match preset {
+            Preset::Custom => CurveChoice::Aces,
+            Preset::Neutral => CurveChoice::Aces,
+            Preset::LightPaintInterior => {
+                tone.contrast = 0.15;
+                tone.shadows = 0.25;
+                tone.highlights = -0.2;
+                tone.saturation = 0.1;
+                tone.structure = 0.2;
+                CurveChoice::Aces
+            }
+            Preset::NightExterior => {
+                tone.shadows = 0.35;
+                tone.highlights = -0.35;
+                tone.saturation = 0.15;
+                tone.denoise = 0.15;
+                tone.vignette = -0.15;
+                CurveChoice::Aces
+            }
+            Preset::BracketHdr => {
+                tone.contrast = 0.2;
+                tone.saturation = 0.1;
+                CurveChoice::Reinhard02
+            }
+        };
+        (tone, curve)
+    }
+
+    pub fn apply_preset(&mut self, preset: Preset) {
+        let (tone, curve) = Self::preset_spec(preset);
+        self.preset = preset;
+        self.tone = tone;
+        self.curve = curve;
+    }
+
+    /// The preset the current controls still match, or `Custom`.
+    pub fn active_preset(&self) -> Preset {
+        let (tone, curve) = Self::preset_spec(self.preset);
+        if self.preset != Preset::Custom && self.tone == tone && self.curve == curve {
+            self.preset
+        } else {
+            Preset::Custom
+        }
+    }
+
+    pub fn tone_for_recipe(&self) -> ToneMapOptions {
+        let mut options = ToneMapOptions {
+            exposure_ev: self.exposure_ev,
+            curve: self.curve.curve(),
+            srgb: true,
+            ..Default::default()
+        };
+        self.tone.apply(&mut options);
+        options
+    }
+
     // ---- recipes -------------------------------------------------------
 
     pub fn save_recipe(&mut self) {
@@ -598,11 +900,7 @@ impl App {
                 })
                 .collect(),
             stack: self.merge_options(None),
-            tone: ToneMapOptions {
-                exposure_ev: self.exposure_ev,
-                curve: self.curve.curve(),
-                srgb: true,
-            },
+            tone: self.tone_for_recipe(),
             export: ExportSettings {
                 path: Some(PathBuf::from(self.out_path.trim()))
                     .filter(|p| !p.as_os_str().is_empty()),
@@ -663,9 +961,11 @@ impl App {
             self.trimmed = n as u32;
         }
         self.exposure_ev = recipe.tone.exposure_ev;
+        self.tone = ToneControls::from_options(&recipe.tone);
         self.curve = match recipe.tone.curve {
             Curve::Aces => CurveChoice::Aces,
             Curve::Reinhard => CurveChoice::Reinhard,
+            Curve::Reinhard02 => CurveChoice::Reinhard02,
             Curve::Hable => CurveChoice::Hable,
             Curve::None => CurveChoice::None,
         };

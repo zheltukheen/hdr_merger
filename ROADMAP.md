@@ -42,42 +42,34 @@ Left over from this phase (moved to v0.3): thread-count control, memory
 estimate before stacking, filename pattern, JPEG quality slider, native RAW,
 decode-at-proxy.
 
-## v0.3 — "masks and deghosting"
+## v0.3 — shipped
 
-Goal: no frame is thrown away because one person walked through it.
+Goal was: no frame is thrown away because someone walked through it.
 
-**Settings & controls**
+- [x] Auto-mask movers: temporal-median detection on 1024 px proxies, threshold
+      slider, per-frame masks applied for review before export
+- [x] Undo / redo for mask strokes (`Ctrl/Cmd+Z`, `Shift+Z`), 8 snapshots
+- [x] Filmstrip, red exclusion overlay, eraser, brush size (`[` `]`)
+- [x] View: zoom (scroll, fit/100 %), pan, live luminance histogram, pixel
+      inspector in the canvas footer
+- [x] Presets: Neutral, Light-paint interior, Night exterior, Bracket HDR; the
+      name falls back to "Custom" the moment a control stops matching
+- [ ] Batch queue (many recipes, one run)
+- [ ] Before / after split against the reference frame
 
-- [ ] Auto-mask movers: median-difference detection with a threshold slider,
-      preview overlay, "apply to this frame / all frames" — Lightroom's
-      deghost levels, but reviewable
-- [ ] Undo/redo for mask strokes (Ctrl/Cmd+Z)
-- [ ] Filmstrip + mask overlay toggle (M), eraser (E), brush size (`[` `]`)
-- [ ] View controls: zoom fit/100 %, pan, before/after split, live RGB histogram,
-      pixel inspector
-- [ ] Presets: built-ins ("light-paint interior", "night exterior",
-      "bracket HDR") plus user presets stored in the recipe
-- [ ] Batch queue: N recipes, one run
+## v0.4 — shipped
 
-**Acceptance**: a 43-frame set with the photographer in every frame is cleaned
-without leaving the app once, and the recipe reproduces the masks.
+Goal was: the display panel stops being a single exposure slider.
 
-## v0.4 — "tone"
-
-Goal: the display panel stops being a single exposure slider.
-
-**Settings & controls**
-
-- [ ] Tone operators: Filmic (Hable), Durand, Fattal, Reinhard '02 — matching
-      what Luminance HDR offers, pickable per recipe
-- [ ] White/black point, contrast, highlights/shadows, saturation/vibrance
-- [ ] Temperature/tint (as-shot default), structure (micro-contrast), denoise,
-      vignette
-- [ ] Non-destructive: tone settings never touch the EXR master
-- [ ] Histogram read-out under the curve controls
-
-**Acceptance**: two recipes with different curves but the same stack produce the
-same master EXR and different display outputs.
+- [x] Levels: black point, white point, contrast, highlights, shadows
+- [x] Colour: saturation, temperature, tint
+- [x] Detail: structure (unsharp), local shadow lift, denoise, vignette
+- [x] Curves: ACES, Reinhard, Reinhard '02, Hable, linear
+- [x] Non-destructive: tone settings never touch the EXR master, and a recipe
+      re-renders without re-stacking
+- [ ] Durand / Fattal / bilateral local operators — deferred: they need an
+      edge-aware solver (a real bilateral filter), not a slider. What ships now
+      is a box-blur local lift, which is honest about being cheap.
 
 ## v0.5 — performance and platform
 
@@ -102,8 +94,8 @@ one to attack — see the GPU result below.
 
 ## v1.0 — the contract
 
+- [x] `--version` prints the engine version and the recipe schema version
 - [ ] Stable CLI flags, stable recipe schema with a migration tool
-- [ ] `--version` prints engine and schema version
 - [ ] Documented engine API with semver guarantees
 
 ## Deliberately not doing

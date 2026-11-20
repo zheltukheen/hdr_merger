@@ -14,10 +14,13 @@ with windows.
   the shot; percentile keeps the strongest stable contribution of the flash.
 * **Aligns frames** by translation (phase correlation) before stacking, so a
   slightly nudged tripod does not smear the result.
-* **Manual masks**: paint on any frame to drop it from the stack where the
-  photographer stood. Masked pixels fall through to the other frames.
-* **Tone mapping**: exposure (manual or auto), ACES / Reinhard / Hable curves,
-  sRGB output.
+* **Masks, manual or automatic**: paint on any frame, or let *Detect movers*
+  find the photographer from the temporal median and paint the masks for you.
+  Masked pixels fall through to the other frames.
+* **Tone mapping**: exposure (auto or EV), levels, contrast, highlights and
+  shadows, saturation, temperature/tint, structure, local lift, denoise,
+  vignette, and ACES / Reinhard / Reinhard '02 / Hable / linear curves.
+  Presets for light-paint interiors, night exteriors and exposure brackets.
 * **Outputs**: 32-bit float linear **EXR** master, 16-bit **TIFF**, 8-bit
   **PNG/JPEG** preview, chosen by the file extension.
 
