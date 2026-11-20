@@ -1,0 +1,17 @@
+[package]
+name = "hdr-merger-gui"
+description = "Cross-platform desktop UI for the HDR / light-paint merger"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "hdr-merger-gui"
+path = "src/main.rs"
+
+[dependencies]
+hdr-core.workspace = true
+eframe = "0.29"
+egui = "0.29"
