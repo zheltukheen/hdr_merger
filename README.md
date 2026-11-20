@@ -103,6 +103,18 @@ Measured on a 43-frame, 5496×3670 set (Apple M1 Pro, release build):
 The 1400 px preview of the same set takes 4.7 s, of which 2.3 s is decode.
 `hdr-merger merge` prints this breakdown after every run.
 
+A wgpu compute stacker also ships, but it measured slower than the CPU on this
+workload (12.8 s vs 8.7 s median — the data has to be uploaded and read back per
+strip, and one order statistic per pixel is too little work for a GPU). It is
+opt-in:
+
+```sh
+hdr-merger merge frames/*.tif -o out.exr --gpu      # or HDR_MERGER_GPU=1
+```
+
+The measurement and the reasoning are in
+[docs/adr/0002-gpu-stacking.md](docs/adr/0002-gpu-stacking.md).
+
 ## Design
 
 * `crates/hdr-core` — the engine. Pure library, no UI, no globals.

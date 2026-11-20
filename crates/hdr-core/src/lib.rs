@@ -6,6 +6,8 @@
 pub mod align;
 pub mod color;
 pub mod error;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod image;
 pub mod io;
 pub mod mask;

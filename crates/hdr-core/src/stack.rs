@@ -107,6 +107,18 @@ impl StackMethod {
         }
     }
 
+    /// Encoding understood by `stack.wgsl`: `(method, param)`.
+    pub fn gpu_code(&self) -> (u32, f32) {
+        match *self {
+            StackMethod::Sum => (0, 0.0),
+            StackMethod::Mean => (1, 0.0),
+            StackMethod::Median => (2, 0.0),
+            StackMethod::Percentile(p) => (3, p),
+            StackMethod::TrimmedMax(drop) => (4, drop as f32),
+            StackMethod::Max => (5, 0.0),
+        }
+    }
+
     /// Pick one value out of the ascending-sorted frame values.
     pub fn pick_sorted(&self, sorted: &[f32]) -> f32 {
         let n = sorted.len();

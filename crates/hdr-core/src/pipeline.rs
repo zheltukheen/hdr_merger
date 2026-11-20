@@ -69,6 +69,11 @@ pub struct MergeOptions {
     /// Crop the result to the area that is valid in every frame.
     #[serde(default = "default_crop_to_intersection")]
     pub crop_to_intersection: bool,
+    /// Use the wgpu stacker instead of the CPU one. Off by default: measured
+    /// slower than the CPU path on 43-frame 60 MP sets (ADR 0002). Env
+    /// `HDR_MERGER_GPU=1` forces it on.
+    #[serde(default)]
+    pub use_gpu: bool,
 }
 
 fn default_crop_to_intersection() -> bool {
@@ -85,6 +90,7 @@ impl Default for MergeOptions {
             input_encoding: InputEncoding::Auto,
             max_shift: None,
             crop_to_intersection: true,
+            use_gpu: false,
         }
     }
 }
@@ -97,6 +103,8 @@ pub struct MergeTimings {
     pub cache_ms: u64,
     pub stack_ms: u64,
     pub total_ms: u64,
+    /// True when the GPU path actually ran (not just when it was requested).
+    pub gpu: bool,
 }
 
 impl MergeTimings {
@@ -225,12 +233,13 @@ pub fn merge(
 
     let (width, height) = size.ok_or(HdrError::NoFrames)?;
     let stack_started = std::time::Instant::now();
-    let image = stack_cached(
+    let (image, used_gpu) = stack_cached(
         &cache_paths,
         &masks,
         width,
         height,
         options.method,
+        options.use_gpu,
         progress,
     )?;
     let stack_ns = stack_started.elapsed().as_nanos();
@@ -252,6 +261,7 @@ pub fn merge(
         cache_ms: (cache_ns / 1_000_000) as u64,
         stack_ms: (stack_ns / 1_000_000) as u64,
         total_ms: started.elapsed().as_millis() as u64,
+        gpu: used_gpu,
     };
     Ok(MergeOutput {
         image,
@@ -343,8 +353,9 @@ fn stack_cached(
     width: u32,
     height: u32,
     method: StackMethod,
+    use_gpu: bool,
     progress: &dyn Fn(u32, u32),
-) -> Result<LinearImage> {
+) -> Result<(LinearImage, bool)> {
     let count = paths.len();
     let row_bytes = width as usize * 3 * 2;
     let mut readers: Vec<File> = Vec::with_capacity(count);
@@ -356,11 +367,28 @@ fn stack_cached(
     }
     let mut buffers: Vec<Vec<u8>> = vec![Vec::new(); count];
     let mut out = LinearImage::new(width, height);
-    let strips = height.div_ceil(STRIP_ROWS);
     let row_pixels = width as usize;
 
-    for (strip, y0) in (0..height).step_by(STRIP_ROWS as usize).enumerate() {
-        let rows = (height - y0).min(STRIP_ROWS) as usize;
+    // A set with any painted mask stays on the CPU: shipping 30 MB of mask
+    // indices per strip to save a few hundred ms is not a trade worth making.
+    #[cfg(feature = "gpu")]
+    let gpu = if (use_gpu || crate::gpu::enabled_by_env()) && masks.iter().all(Option::is_none) {
+        crate::gpu::GpuStacker::new()
+    } else {
+        None
+    };
+    #[cfg(not(feature = "gpu"))]
+    let gpu: Option<()> = None;
+    let mut used_gpu = false;
+
+    // A GPU strip has to fit one storage binding (128 MB on downlevel adapters),
+    // so the tile shrinks when the stacker is enabled: 64 rows of a 5496x3 f16
+    // strip times 64 frames is ~91 MB.
+    let strip_rows = if gpu.is_some() { 64 } else { STRIP_ROWS };
+    let strips = height.div_ceil(strip_rows);
+
+    for (strip, y0) in (0..height).step_by(strip_rows as usize).enumerate() {
+        let rows = (height - y0).min(strip_rows) as usize;
         let strip_bytes = rows * row_bytes;
         for (index, reader) in readers.iter_mut().enumerate() {
             let buffer = &mut buffers[index];
@@ -371,6 +399,25 @@ fn stack_cached(
 
         let start = y0 as usize * row_pixels * 3;
         let end = start + rows * row_pixels * 3;
+
+        #[cfg(feature = "gpu")]
+        if let Some(stacker) = &gpu {
+            if count <= crate::gpu::MAX_FRAMES {
+                let mut packed = Vec::with_capacity(count * strip_bytes);
+                for buffer in &buffers {
+                    packed.extend_from_slice(buffer);
+                }
+                let pixels = rows * row_pixels;
+                let (code, param) = method.gpu_code();
+                if let Some(values) = stacker.stack(&packed, count, pixels, code, param) {
+                    out.data[start..end].copy_from_slice(&values);
+                    used_gpu = true;
+                    progress(strip as u32 + 1, strips);
+                    continue;
+                }
+            }
+        }
+
         out.data[start..end]
             .par_chunks_mut(row_pixels * 3)
             .enumerate()
@@ -401,7 +448,7 @@ fn stack_cached(
             });
         progress(strip as u32 + 1, strips);
     }
-    Ok(out)
+    Ok((out, used_gpu))
 }
 
 /// Temporary f16 frame cache, removed on drop.

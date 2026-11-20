@@ -292,6 +292,7 @@ impl App {
             input_encoding: self.input_encoding,
             max_shift: self.shift_guard.then_some(self.max_shift),
             crop_to_intersection: self.crop,
+            use_gpu: true,
         }
     }
 

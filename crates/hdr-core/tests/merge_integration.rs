@@ -225,3 +225,57 @@ fn exr_master_keeps_values_above_one() {
         reloaded.pixel(0, 0)
     );
 }
+
+#[test]
+fn gpu_stack_matches_the_cpu_stack_when_an_adapter_exists() {
+    if hdr_core::gpu::GpuStacker::new().is_none() {
+        eprintln!("no GPU adapter here, skipping the parity check");
+        return;
+    }
+    let dir = workdir("gpu-parity");
+    let (w, h) = (24u32, 8u32);
+    let mut paths = Vec::new();
+    for (index, level) in [0.1f32, 0.35, 0.6, 0.85].iter().enumerate() {
+        let mut pixels = vec![[*level, *level * 0.5, *level * 0.25]; (w * h) as usize];
+        pixels[index * 7] = [1.0, 1.0, 1.0];
+        let path = dir.join(format!("g{index}.tif"));
+        write_frame(&path, &pixels, w, h);
+        paths.push(path);
+    }
+
+    let cpu = merge_paths(
+        &paths,
+        &MergeOptions {
+            method: StackMethod::Median,
+            align: false,
+            use_gpu: false,
+            ..Default::default()
+        },
+        &|_, _| {},
+    )
+    .expect("cpu merge");
+    let gpu = merge_paths(
+        &paths,
+        &MergeOptions {
+            method: StackMethod::Median,
+            align: false,
+            use_gpu: true,
+            ..Default::default()
+        },
+        &|_, _| {},
+    )
+    .expect("gpu merge");
+
+    assert!(gpu.timings.gpu, "the GPU stacker did not run at all");
+    for index in 0..cpu.image.pixel_count() {
+        let base = index * 3;
+        for channel in 0..3 {
+            let a = cpu.image.data[base + channel];
+            let b = gpu.image.data[base + channel];
+            assert!(
+                (a - b).abs() < 1e-4,
+                "pixel {index} channel {channel}: {a} vs {b}"
+            );
+        }
+    }
+}

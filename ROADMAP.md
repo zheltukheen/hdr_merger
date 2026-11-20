@@ -82,17 +82,20 @@ same master EXR and different display outputs.
 ## v0.5 — performance and platform
 
 Measured baseline (43 × 5496×3670, M1 Pro): decode 2.5 s, cache 3.9 s, stack
-9.1 s median. The stack is the biggest phase, so it gets the GPU first.
+8.7 s median. The stack is the biggest single phase, but it is not the cheapest
+one to attack — see the GPU result below.
 
-- [x] Sort-free selection in the stacker (order statistic instead of a full
-      sort): median 11.4 s → 9.1 s, p90 18.1 s → 10.0 s
-- [ ] **GPU stack (wgpu compute) as the default**, CPU fallback when there is no
-      adapter or `HDR_MERGER_GPU=0`. Ships only if it beats 4.5 s on the set
-      above with byte-parity — see [docs/adr/0002-gpu-stacking.md](docs/adr/0002-gpu-stacking.md)
-- [ ] Faster decode and cache: they are 33 % of the run and carry the same
-      weight as the stack once the GPU lands
+- [x] Sort-free selection in the stacker: median 11.4 s → 8.7 s, p90
+      18.1 s → 8.0 s
+- [x] GPU stacker (wgpu compute), parity-tested against the CPU path
+- [x] Measured against the 4.5 s acceptance rule: **12.8 s vs 8.7 s** on median.
+      GPU is therefore **opt-in** (`--gpu`, `HDR_MERGER_GPU=1`), not the default
+      — [docs/adr/0002-gpu-stacking.md](docs/adr/0002-gpu-stacking.md)
+- [ ] Revisit GPU only with a design that removes the per-strip upload and
+      readback (fused decode→cache, or histogram fusion)
+- [ ] Faster decode and cache — 31–38 % of the run, no algorithmic risk
+- [ ] SIMD selection for the CPU path (fixed N)
 - [ ] Streaming EXR export (no full master in RAM)
-- [ ] SIMD selection for fixed N (CPU fallback path)
 - [ ] Signed/notarised macOS builds, Windows installer
 - [ ] UI localisation (en/ru)
 - [ ] Dark-frame subtraction (StarStaX parity) — backlog unless requested

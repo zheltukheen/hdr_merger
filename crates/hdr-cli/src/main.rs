@@ -75,6 +75,11 @@ struct MergeArgs {
     #[arg(long, default_value = "auto")]
     input: String,
 
+    /// Use the wgpu compute stacker instead of the CPU one (slower on the
+    /// sets measured so far, kept for experimentation).
+    #[arg(long)]
+    gpu: bool,
+
     /// Directory with `<frame-stem>.mask.json` files.
     #[arg(long)]
     mask_dir: Option<PathBuf>,
@@ -133,6 +138,7 @@ fn merge_command(args: MergeArgs) -> Result<()> {
         reference: args.reference,
         max_dim: args.max_dim,
         input_encoding: parse_input_encoding(&args.input)?,
+        use_gpu: args.gpu,
         max_shift: args.max_shift,
         crop_to_intersection: !args.no_crop,
     };
@@ -182,12 +188,13 @@ fn merge_command(args: MergeArgs) -> Result<()> {
         tonemap.exposure_ev
     );
     eprintln!(
-        "time: decode {} ms, cache {} ms, stack {} ms, total {} ms ({:.0}% before the stack)",
+        "time: decode {} ms, cache {} ms, stack {} ms, total {} ms ({:.0}% before the stack, {} stacker)",
         timings.decode_ms,
         timings.cache_ms,
         timings.stack_ms,
         timings.total_ms,
-        timings.decode_share() * 100.0
+        timings.decode_share() * 100.0,
+        if timings.gpu { "GPU" } else { "CPU" }
     );
 
     hdr_core::io::save(&args.out, &merged.image, &tonemap)?;

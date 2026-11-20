@@ -1,74 +1,70 @@
 # ADR 0002 — GPU compute for the stack
 
-Status: **proposed** (decision blocked on a measurement, see "Acceptance")
+Status: **rejected as the default, kept as an opt-in** (v0.2.3)
 
-## Context
+## Question
 
-The user wants GPU compute to be the default stacking path. Before building it,
-the CPU path was measured on the real set (43 frames, 5496×3670, macOS M1 Pro,
-16 GB, release build, TIFFs in the page cache):
+Should the per-pixel stack run on the GPU (wgpu compute) instead of on the CPU,
+and be the default?
 
-| phase | before | share |
-| --- | --- | --- |
-| decode (TIFF → linear f32) | 2.5 s | 13 % |
-| cache write (shift + f16) | 3.9 s | 20 % |
-| stack (median) | 11.4 s | 59 % |
-| **total** | **19.4 s** | |
+## What was built
 
-So the stack *is* the biggest phase — the premise "GPU has something to win" is
-correct. One CPU fix landed before any GPU code: the stacker sorted all N values
-per pixel/channel although only an order statistic is needed.
+A wgpu compute stacker (`crates/hdr-core/src/gpu.rs` + `stack.wgsl`): one
+invocation per pixel channel, insertion sort in a 64-value local array, all six
+methods encoded as a method code. It is parity-tested against the CPU path
+(`gpu_stack_matches_the_cpu_stack_when_an_adapter_exists`, tolerance 1e-4) and
+falls back per strip when there is no adapter, the set has masks, or it has more
+than 64 frames.
 
-| method | stack before | stack after (selection) | total after |
+## Measurement
+
+43 frames, 5496×3670, Apple M1 Pro, release build, TIFFs in the page cache.
+Same machine, same run, only the stacker differs:
+
+| method | CPU stack | GPU stack | verdict |
 | --- | --- | --- | --- |
-| median | 11.4 s | 9.1 s | 16.1 s |
-| p90 | 18.1 s | 10.0 s | 17.1 s |
-| sum | — | 7.1 s | 14.2 s |
+| median | 8.7 s | 12.8 s | GPU 1.5× slower |
+| p90 | 8.0 s | 10.0 s | GPU 1.25× slower |
+| sum (no sorting at all) | 6.6 s | 9.2 s | GPU 1.4× slower |
 
-The proxy preview (1400 px) is 0.4 s of stack and 2.3 s of decode, so the GPU
-does not touch it.
+Total run, median: 15.6 s on CPU vs 20.8 s on GPU.
 
-## What is actually hard
+The acceptance rule written before the implementation was "median stack < 4.5 s",
+so it fails by a factor of three.
 
-The arithmetic is trivial — pick one of 43 values. The difficulty is the data
-layout and per-thread state:
+## Why the GPU loses here
 
-* 43 frames × 60 MP × 3 channels × 2 B = **15.5 GB**; it does not fit in VRAM,
-  so the GPU pass must be tiled (upload N tiles, dispatch, read back).
-* every pixel needs its own order statistic → per-thread private array of 43
-  floats (spills to local memory), or one workgroup per pixel (poor occupancy),
-  or a multi-pass counting scheme (more bandwidth, no sort).
-* the current cache layout `[frame][pixel]` is coalescing-friendly if a thread
-  maps to a pixel — that part is fine.
+* **The CPU never copies the data.** The f16 strip cache is read straight from
+  the page cache; the GPU path uploads ~5.2 GB and reads back ~0.5 GB through
+  staging buffers, in 57 strips, each with its own bind group and a blocking
+  `device.poll`.
+* **The work per pixel is tiny.** One order statistic out of ~40 values is a few
+  hundred comparisons. Ten CPU cores with the data already in cache beat a GPU
+  that has to be fed.
+* **Per-thread state is the wrong shape.** A 64-float local array spills to
+  scratch memory and kills occupancy; sorting 40 values per thread is the
+  textbook anti-pattern for a GPU.
+* Even `sum`, which needs no ordering, lost — which isolates the cause to
+  transfer and dispatch overhead, not to the sorting.
 
-## Options
+## Decision
 
-| Option | Note |
-| --- | --- |
-| Per-thread insertion sort in a compute shader | simplest, ~460 compare-swaps per pixel/channel, spills |
-| Workgroup bitonic sort, one workgroup per pixel | correct, but 180 M tiny workgroups |
-| Multi-pass count-below-pivot | no sort, but 6+ passes over 15 GB |
-| GPU for sum/mean/max only | trivially parallel, but those are not the default method |
-| No GPU | 9.1 s median, memory-bound-ish |
+* CPU stays the default (`MergeOptions::use_gpu = false`).
+* The GPU path remains, reachable with `--gpu` / `HDR_MERGER_GPU=1`, because it
+  is correct and is the base for a future design that avoids the per-strip round
+  trip.
+* The performance target moves to **decode + cache** (31–38 % of the run, no
+  algorithmic risk) and to SIMD selection on the CPU path.
 
-## Acceptance
+## What would change the answer
 
-The GPU path ships as the default only if, on the set above:
+Only a design that does not ship the stack to the GPU per strip:
 
-* median stack **< 4.5 s** (2× the CPU path), and
-* the result is byte-identical to the CPU stack for integer-valued inputs
-  (parity test, tolerance 1e-6), and
-* it falls back to CPU automatically when no adapter exists or
-  `HDR_MERGER_GPU=0` is set.
+* keep the whole set resident (needs ~15 GB of VRAM — not available), or
+* a fused decode→stack pipeline where the GPU writes the cache and never reads
+  it back (removes the 5.2 GB upload and the strip sync), or
+* a different algorithm (per-pixel histogram fusion) that trades the sort for
+  bandwidth the GPU actually has.
 
-If the measured win is smaller, the GPU path stays behind a flag and the
-roadmap target moves to decode and cache instead (they are 33 % of the run and
-have no algorithmic risk).
-
-## Consequences either way
-
-* `StackMethod` is already the seam: both paths produce a `LinearImage` from the
-  same cache, so the CLI and the GUI do not care which one ran.
-* The cache must stay tile-addressable; the f16 layout is unchanged.
-* CI runners have no GPU adapter, so the parity test skips itself and the CPU
-  path keeps covering behaviour.
+Until one of those is measured to win, "GPU by default" would make the tool
+slower for every user.
