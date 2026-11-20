@@ -54,6 +54,8 @@ Goal was: no frame is thrown away because someone walked through it.
       inspector in the canvas footer
 - [x] Presets: Neutral, Light-paint interior, Night exterior, Bracket HDR; the
       name falls back to "Custom" the moment a control stops matching
+- [x] Focus stacking mode: per pixel, keep the sharpest frame (Laplacian
+      response over a 5x5 window, mask-aware)
 - [ ] Batch queue (many recipes, one run)
 - [ ] Before / after split against the reference frame
 
@@ -67,6 +69,7 @@ Goal was: the display panel stops being a single exposure slider.
 - [x] Curves: ACES, Reinhard, Reinhard '02, Hable, linear
 - [x] Non-destructive: tone settings never touch the EXR master, and a recipe
       re-renders without re-stacking
+- [x] Layered PSD/PSB export: one layer per frame, mask channel per layer
 - [ ] Durand / Fattal / bilateral local operators — deferred: they need an
       edge-aware solver (a real bilateral filter), not a slider. What ships now
       is a box-blur local lift, which is honest about being cheap.

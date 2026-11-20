@@ -10,8 +10,10 @@ with windows.
 ## What it does
 
 * **Stacks N frames per pixel** with a method you pick: median, percentile,
-  trimmed max, mean, sum, max. Median is what removes people who walked through
-  the shot; percentile keeps the strongest stable contribution of the flash.
+  trimmed max, mean, sum, max — or **focus stack**, which keeps the sharpest
+  frame per pixel for focus-bracketed sets. Median is what removes people who
+  walked through the shot; percentile keeps the strongest stable contribution of
+  the flash.
 * **Aligns frames** by translation (phase correlation) before stacking, so a
   slightly nudged tripod does not smear the result.
 * **Masks, manual or automatic**: paint on any frame, or let *Detect movers*
@@ -22,7 +24,8 @@ with windows.
   vignette, and ACES / Reinhard / Reinhard '02 / Hable / linear curves.
   Presets for light-paint interiors, night exteriors and exposure brackets.
 * **Outputs**: 32-bit float linear **EXR** master, 16-bit **TIFF**, 8-bit
-  **PNG/JPEG** preview, chosen by the file extension.
+  **PNG/JPEG** preview, and layered **PSD/PSB** where every frame becomes a
+  layer with its mask — chosen by the file extension.
 
 ## Install
 
@@ -60,7 +63,12 @@ hdr-merger merge frames/*.tif -o room.exr --method trimmed:3
 
 # proxy preview, one third of the resolution
 hdr-merger merge frames/*.tif -o preview.jpg --max-dim 2000
+
+# layered export: one PSD layer per frame, with its mask
+hdr-merger layers frames/*.tif -o retouch.psd
 ```
+
+Focus bracketing uses the same command with `--method focus`.
 
 `hdr-merger methods`, `hdr-merger info photo.exr` and `--help` cover the rest.
 
@@ -117,6 +125,17 @@ hdr-merger merge frames/*.tif -o out.exr --gpu      # or HDR_MERGER_GPU=1
 
 The measurement and the reasoning are in
 [docs/adr/0002-gpu-stacking.md](docs/adr/0002-gpu-stacking.md).
+
+## App
+
+Settings (theme, preview proxy, JPEG quality, update check) live in the OS
+config directory; `?` opens the quick start and shortcut list. The update check
+only tells you a release exists and links to it — it never replaces a binary
+behind your back.
+
+Releases ship a `.dmg` with a signed-ad-hoc `HDR Merger.app` on macOS, a
+`.tar.gz` with a `.desktop` entry on Linux, and a `.zip` with the executables on
+Windows.
 
 ## Design
 
