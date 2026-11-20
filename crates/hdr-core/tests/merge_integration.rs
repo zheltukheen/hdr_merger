@@ -19,7 +19,11 @@ fn workdir(name: &str) -> PathBuf {
 }
 
 fn linear_tonemap() -> ToneMapOptions {
-    ToneMapOptions { exposure_ev: 0.0, curve: Curve::None, srgb: false }
+    ToneMapOptions {
+        exposure_ev: 0.0,
+        curve: Curve::None,
+        srgb: false,
+    }
 }
 
 fn write_frame(path: &Path, pixels: &[[f32; 3]], width: u32, height: u32) {
@@ -49,12 +53,19 @@ fn median_removes_a_mover_and_writes_an_exr() {
         })
         .collect();
 
-    let options = MergeOptions { method: StackMethod::Median, align: false, ..Default::default() };
+    let options = MergeOptions {
+        method: StackMethod::Median,
+        align: false,
+        ..Default::default()
+    };
     let merged = merge_paths(&paths, &options, &|_, _| {}).expect("merge");
 
     for y in 0..h {
         let pixel = merged.image.pixel(5, y);
-        assert!((pixel[0] - 0.25).abs() < 2e-3, "mover survived at {y}: {pixel:?}");
+        assert!(
+            (pixel[0] - 0.25).abs() < 2e-3,
+            "mover survived at {y}: {pixel:?}"
+        );
     }
 
     let out = dir.join("result.exr");
@@ -79,10 +90,17 @@ fn a_mask_hands_the_pixel_to_the_other_frames() {
     mask.paint_circle(0.0, 0.0, 1.5, 0.0, 255);
 
     let frames = vec![FrameInput::with_mask(&a, mask), FrameInput::new(&b)];
-    let options = MergeOptions { method: StackMethod::Max, align: false, ..Default::default() };
+    let options = MergeOptions {
+        method: StackMethod::Max,
+        align: false,
+        ..Default::default()
+    };
     let merged = merge(&frames, &options, &|_, _| {}).expect("merge");
 
-    assert!((merged.image.pixel(0, 0)[0] - 0.8).abs() < 2e-3, "mask was ignored");
+    assert!(
+        (merged.image.pixel(0, 0)[0] - 0.8).abs() < 2e-3,
+        "mask was ignored"
+    );
     assert!((merged.image.pixel(4, 0)[0] - 0.8).abs() < 2e-3);
 }
 
@@ -99,13 +117,21 @@ fn percentile_keeps_highlights_that_median_drops() {
     }
     let median = merge_paths(
         &paths,
-        &MergeOptions { method: StackMethod::Median, align: false, ..Default::default() },
+        &MergeOptions {
+            method: StackMethod::Median,
+            align: false,
+            ..Default::default()
+        },
         &|_, _| {},
     )
     .expect("median");
     let p90 = merge_paths(
         &paths,
-        &MergeOptions { method: StackMethod::Percentile(90.0), align: false, ..Default::default() },
+        &MergeOptions {
+            method: StackMethod::Percentile(90.0),
+            align: false,
+            ..Default::default()
+        },
         &|_, _| {},
     )
     .expect("p90");
@@ -145,14 +171,25 @@ fn a_shifted_frame_is_aligned_before_stacking() {
     hdr_core::io::save(&a, &base, &linear_tonemap()).expect("save a");
     hdr_core::io::save(&b, &moved, &linear_tonemap()).expect("save b");
 
-    let options = MergeOptions { method: StackMethod::Mean, align: true, ..Default::default() };
+    let options = MergeOptions {
+        method: StackMethod::Mean,
+        align: true,
+        ..Default::default()
+    };
     let merged = merge_paths(&[a, b], &options, &|_, _| {}).expect("merge");
 
     let registered = merged.shifts[1];
-    assert_eq!((registered.dx, registered.dy), (3, 2), "shift not recovered");
+    assert_eq!(
+        (registered.dx, registered.dy),
+        (3, 2),
+        "shift not recovered"
+    );
     let sample = merged.image.pixel(32, 32);
     let reference = base.pixel(32, 32);
-    assert!((sample[0] - reference[0]).abs() < 0.05, "aligned stack drifted: {sample:?}");
+    assert!(
+        (sample[0] - reference[0]).abs() < 0.05,
+        "aligned stack drifted: {sample:?}"
+    );
 }
 
 #[test]
@@ -170,7 +207,11 @@ fn exr_master_keeps_values_above_one() {
     }
     let merged = merge_paths(
         &paths,
-        &MergeOptions { method: StackMethod::Sum, align: false, ..Default::default() },
+        &MergeOptions {
+            method: StackMethod::Sum,
+            align: false,
+            ..Default::default()
+        },
         &|_, _| {},
     )
     .expect("merge");
@@ -178,5 +219,9 @@ fn exr_master_keeps_values_above_one() {
     hdr_core::io::save(&out, &merged.image, &ToneMapOptions::default()).expect("save");
 
     let reloaded = hdr_core::io::load(&out, InputEncoding::Linear).expect("read");
-    assert!(reloaded.pixel(0, 0)[0] > 1.8, "cumulative light lost: {:?}", reloaded.pixel(0, 0));
+    assert!(
+        reloaded.pixel(0, 0)[0] > 1.8,
+        "cumulative light lost: {:?}",
+        reloaded.pixel(0, 0)
+    );
 }
