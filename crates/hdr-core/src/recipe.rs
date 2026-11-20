@@ -296,6 +296,7 @@ mod tests {
             use_gpu: true,
             threads: Some(4),
             focus_feather: 4,
+            dark_frame: None,
         };
         let tone = ToneMapOptions {
             exposure_ev: 1.25,

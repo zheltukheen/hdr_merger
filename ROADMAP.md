@@ -103,7 +103,6 @@ one to attack — see the GPU result below.
 - [x] Streaming EXR export (no full master in RAM)
 - [ ] Signed/notarised macOS builds, Windows installer
 - [ ] UI localisation (en/ru)
-- [ ] Dark-frame subtraction (StarStaX parity) — backlog unless requested
 
 ## v1.0 — the contract
 

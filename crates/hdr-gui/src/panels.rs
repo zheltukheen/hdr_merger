@@ -296,6 +296,18 @@ fn stack(app: &mut App, ui: &mut egui::Ui) {
         theme::int_slider(ui, &mut threads, 0..=64, " (0 = auto)");
         app.threads = (threads > 0).then_some(threads as usize);
     });
+    theme::control_row(ui, "Dark frame", |ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut app.dark_frame_input)
+                .hint_text("optional path")
+                .desired_width(150.0),
+        )
+        .changed()
+        .then(|| {
+            let text = app.dark_frame_input.trim().to_owned();
+            app.dark_frame = (!text.is_empty()).then(|| std::path::PathBuf::from(text));
+        });
+    });
     theme::control_row(ui, "Input", |ui| {
         egui::ComboBox::from_id_salt("encoding")
             .selected_text(match app.input_encoding {

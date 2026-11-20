@@ -87,6 +87,10 @@ struct MergeArgs {
     #[arg(long, default_value_t = 8)]
     focus_feather: usize,
 
+    /// Dark frame to subtract from every frame.
+    #[arg(long)]
+    dark: Option<PathBuf>,
+
     /// Save the focus depth map next to the output (.png).
     #[arg(long)]
     depth: bool,
@@ -218,6 +222,7 @@ fn merge_command(args: MergeArgs) -> Result<()> {
         use_gpu: args.gpu,
         threads: args.threads,
         focus_feather: args.focus_feather,
+        dark_frame: args.dark.clone(),
         max_shift: args.max_shift,
         crop_to_intersection: !args.no_crop,
     };
@@ -388,6 +393,7 @@ fn batch_command(args: BatchArgs) -> Result<()> {
         crop_to_intersection: true,
         threads: None,
         focus_feather: args.focus_feather,
+        dark_frame: None,
         use_gpu: false,
     };
     let curve = parse_curve(&args.curve)?;

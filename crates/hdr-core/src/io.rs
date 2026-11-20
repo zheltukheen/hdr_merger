@@ -7,7 +7,9 @@
 //!
 //! `InputEncoding` overrides that inference per run.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::BufWriter;
 use std::path::Path;
 
@@ -58,12 +60,146 @@ pub fn dimensions(path: &Path) -> Result<(u32, u32)> {
     })
 }
 
+/// Camera RAW extensions we can hand to an external decoder.
+const RAW_EXTENSIONS: &[&str] = &[
+    "cr2", "cr3", "nef", "nrw", "arw", "srf", "sr2", "dng", "raf", "orf", "rw2", "pef", "srw",
+    "raw",
+];
+
+pub fn is_raw(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| RAW_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 pub fn load(path: &Path, encoding: InputEncoding) -> Result<LinearImage> {
-    let decoded = ::image::open(path).map_err(|e| HdrError::Decode {
-        path: path.to_path_buf(),
+    let source = if is_raw(path) {
+        raw_to_tiff(path)?
+    } else {
+        path.to_path_buf()
+    };
+    let decoded = ::image::open(&source).map_err(|e| HdrError::Decode {
+        path: source.clone(),
         source: e,
     })?;
     Ok(convert(decoded, encoding))
+}
+
+/// Convert a RAW file to a 16-bit linear TIFF with an external decoder and
+/// cache the result next to the system temp dir, keyed by path, size and
+/// modification time.
+///
+/// We do not bundle a RAW pipeline: LibRaw (via `dcraw`/`dcraw_emu`) or
+/// RawTherapee already do demosaic, white balance and colour, and re-doing that
+/// badly would be worse than calling the tool the user already has.
+fn raw_to_tiff(path: &Path) -> Result<std::path::PathBuf> {
+    let metadata = std::fs::metadata(path)?;
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    metadata.len().hash(&mut hasher);
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .hash(&mut hasher);
+    let key = format!("{:016x}", hasher.finish());
+
+    let cache_dir = std::env::temp_dir().join("hdr-merger-raw");
+    std::fs::create_dir_all(&cache_dir)?;
+    let cached = cache_dir.join(format!("{key}.tif"));
+    if cached.exists() {
+        return Ok(cached);
+    }
+
+    let (converter, binary) = find_raw_converter().ok_or_else(|| {
+        HdrError::Engine(format!(
+            "no RAW converter found for {}: install LibRaw (dcraw_emu / dcraw) or rawtherapee-cli",
+            path.display()
+        ))
+    })?;
+    let work = cache_dir.join(format!("{key}-work"));
+    std::fs::create_dir_all(&work)?;
+
+    let status = match converter {
+        RawConverter::Dcraw => std::process::Command::new(&binary)
+            .args(["-4", "-T", "-w", "-o", "1", "-q", "3"])
+            .arg(path)
+            .current_dir(&work)
+            .status(),
+        RawConverter::RawTherapee => std::process::Command::new(&binary)
+            .args(["-t", "-Y", "-c"])
+            .arg(path)
+            .current_dir(&work)
+            .arg("-o")
+            .arg(&cached)
+            .status(),
+    }
+    .map_err(|error| HdrError::Engine(format!("cannot run {}: {error}", binary.display())))?;
+    if !status.success() {
+        return Err(HdrError::Engine(format!(
+            "{} failed to decode {}",
+            binary.display(),
+            path.display()
+        )));
+    }
+
+    // dcraw writes <stem>.tiff into the working directory, dcraw_emu writes it
+    // next to the input. Accept either and move it into the cache.
+    let produced = work
+        .join(format!(
+            "{}.tiff",
+            path.file_stem().unwrap_or_default().to_string_lossy()
+        ))
+        .exists()
+        .then(|| {
+            work.join(format!(
+                "{}.tiff",
+                path.file_stem().unwrap_or_default().to_string_lossy()
+            ))
+        })
+        .or_else(|| {
+            let sibling = std::path::PathBuf::from(format!("{}.tiff", path.display()));
+            sibling.exists().then_some(sibling)
+        });
+    let produced = produced.ok_or_else(|| {
+        HdrError::Engine(format!(
+            "{} produced no TIFF for {}",
+            binary.display(),
+            path.display()
+        ))
+    })?;
+    std::fs::rename(&produced, &cached)?;
+    let _ = std::fs::remove_dir_all(&work);
+    Ok(cached)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawConverter {
+    Dcraw,
+    RawTherapee,
+}
+
+fn find_raw_converter() -> Option<(RawConverter, std::path::PathBuf)> {
+    let candidates = [
+        ("dcraw_emu", RawConverter::Dcraw),
+        ("dcraw", RawConverter::Dcraw),
+        ("rawtherapee-cli", RawConverter::RawTherapee),
+    ];
+    for (name, converter) in candidates {
+        if let Some(path) = find_in_path(name) {
+            return Some((converter, path));
+        }
+    }
+    None
+}
+
+fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 fn convert(decoded: DynamicImage, encoding: InputEncoding) -> LinearImage {
@@ -301,6 +437,14 @@ mod tests {
         let loaded = load(&path, InputEncoding::Linear).unwrap();
         let pixel = loaded.pixel(0, 0);
         assert!((pixel[0] - 0.5).abs() < 1e-3, "{pixel:?}");
+    }
+
+    #[test]
+    fn raw_extensions_are_recognised() {
+        assert!(is_raw(Path::new("a.CR3")));
+        assert!(is_raw(Path::new("b/photo.dng")));
+        assert!(!is_raw(Path::new("c.tif")));
+        assert!(!is_raw(Path::new("no-extension")));
     }
 
     #[test]

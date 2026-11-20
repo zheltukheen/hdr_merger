@@ -100,12 +100,11 @@ engine the CLI uses — no second implementation to drift.
 
 ## Input formats
 
-TIFF, PNG, JPEG and EXR. Raw camera files are decoded by the RAW converter of
-your choice into a 16-bit linear TIFF first:
-
-```sh
-dcraw_emu -4 -T -w -o 1 -q 3 photo.CR3     # -> photo.CR3.tiff, linear 16-bit
-```
+TIFF, PNG, JPEG, EXR **and camera RAW** (CR2/CR3, NEF, ARW, DNG, RAF, ORF, RW2,
+PEF, SRW). RAW is decoded through an external decoder — LibRaw (`dcraw_emu` /
+`dcraw`) or `rawtherapee-cli`, whichever is on `PATH` — and the resulting 16-bit
+linear TIFF is cached, so a second run does not convert again. Pass
+`--dark <dark.tif>` to subtract a dark frame before stacking.
 
 Encoding is inferred per file: 8-bit means sRGB display values, 16-bit and
 32-bit float mean linear light. Override with `--input srgb|linear`.

@@ -76,6 +76,10 @@ pub struct MergeOptions {
     /// >0 blends across a scene boundary so seams disappear.
     #[serde(default = "default_feather")]
     pub focus_feather: usize,
+    /// Optional dark frame (same exposure, lens cap) subtracted from every
+    /// frame before stacking.
+    #[serde(default)]
+    pub dark_frame: Option<PathBuf>,
     /// Use the wgpu stacker instead of the CPU one. Off by default: measured
     /// slower than the CPU path on 43-frame 60 MP sets (ADR 0002). Env
     /// `HDR_MERGER_GPU=1` forces it on.
@@ -99,6 +103,7 @@ impl Default for MergeOptions {
             crop_to_intersection: true,
             threads: None,
             focus_feather: 8,
+            dark_frame: None,
             use_gpu: false,
         }
     }
@@ -186,6 +191,7 @@ fn prepare(
     let mut cache_paths: Vec<Option<PathBuf>> = vec![None; frames.len()];
     let mut size: Option<(u32, u32)> = None;
     let mut reference_probe: Option<LinearImage> = None;
+    let mut dark: Option<LinearImage> = None;
     let mut warnings = Vec::new();
     let total = frames.len() as u32;
     let mut decode_ns: u128 = 0;
@@ -200,6 +206,22 @@ fn prepare(
             image = image.fit_within(max_dim);
         }
         let current = (image.width, image.height);
+        if let Some(dark_path) = &options.dark_frame {
+            let dark_image = match &dark {
+                Some(cached) => cached.clone(),
+                None => {
+                    let loaded = io::load(dark_path, options.input_encoding)?;
+                    dark = Some(loaded.clone());
+                    loaded
+                }
+            };
+            let dark_image = if (dark_image.width, dark_image.height) == current {
+                dark_image
+            } else {
+                dark_image.resized(current.0, current.1)
+            };
+            subtract_dark(&mut image, &dark_image);
+        }
         match size {
             None => size = Some(current),
             Some(expected) if expected != current => {
@@ -359,6 +381,13 @@ pub fn merge(
         },
         depth,
     })
+}
+
+/// `image = max(image - dark, 0)`, in place.
+fn subtract_dark(image: &mut LinearImage, dark: &LinearImage) {
+    for (value, floor) in image.data.iter_mut().zip(dark.data.iter()) {
+        *value = (*value - *floor).max(0.0);
+    }
 }
 
 fn depth_image(values: Vec<f32>, width: u32, height: u32) -> LinearImage {

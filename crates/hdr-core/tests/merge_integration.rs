@@ -451,3 +451,30 @@ fn feathered_focus_blends_the_seam_and_reports_depth() {
     assert!(depth.pixel(2, 0)[0] < 0.25, "left should be near frame a");
     assert!(depth.pixel(29, 0)[0] > 0.75, "right should be near frame b");
 }
+
+#[test]
+fn a_dark_frame_is_subtracted_before_stacking() {
+    let dir = workdir("dark");
+    let (w, h) = (16u32, 4u32);
+    let lit = dir.join("lit.tif");
+    let dark = dir.join("dark.tif");
+    write_frame(&lit, &vec![[0.5, 0.5, 0.5]; (w * h) as usize], w, h);
+    write_frame(&dark, &vec![[0.2, 0.2, 0.2]; (w * h) as usize], w, h);
+
+    let merged = merge_paths(
+        &[lit],
+        &MergeOptions {
+            method: StackMethod::Mean,
+            align: false,
+            dark_frame: Some(dark),
+            ..Default::default()
+        },
+        &|_, _| {},
+    )
+    .expect("merge with a dark frame");
+    let value = merged.image.pixel(4, 0)[0];
+    assert!(
+        (value - 0.3).abs() < 5e-3,
+        "dark frame not subtracted: {value}"
+    );
+}

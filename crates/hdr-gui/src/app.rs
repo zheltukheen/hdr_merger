@@ -313,6 +313,8 @@ pub struct App {
 
     pub threads: Option<usize>,
     pub focus_feather: usize,
+    pub dark_frame: Option<std::path::PathBuf>,
+    pub dark_frame_input: String,
     pub export_depth: bool,
     pub deghost_threshold: f32,
     pub tool: Tool,
@@ -388,6 +390,8 @@ impl App {
             target: 0.55,
             threads: None,
             focus_feather: 8,
+            dark_frame: None,
+            dark_frame_input: String::new(),
             export_depth: false,
             deghost_threshold: 0.15,
             tool: Tool::Inspect,
@@ -471,6 +475,7 @@ impl App {
             use_gpu: false,
             threads: self.threads,
             focus_feather: self.focus_feather,
+            dark_frame: self.dark_frame.clone(),
         }
     }
 
