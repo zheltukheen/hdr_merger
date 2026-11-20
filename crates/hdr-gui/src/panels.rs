@@ -230,6 +230,15 @@ fn stack(app: &mut App, ui: &mut egui::Ui) {
             theme::slider(ui, &mut app.percentile, 1.0..=99.0, "p");
         });
     }
+    if app.method == MethodChoice::Focus {
+        ui.add_space(SP_XS);
+        theme::control_row(ui, "Feather", |ui| {
+            let mut feather = app.focus_feather as u32;
+            theme::int_slider(ui, &mut feather, 0..=64, " px");
+            app.focus_feather = feather as usize;
+        });
+        theme::hint(ui, "0 = hard per-pixel pick, >0 blends the seam.");
+    }
     if app.method == MethodChoice::TrimmedMax {
         ui.add_space(SP_XS);
         theme::control_row(ui, "Drop top", |ui| {
@@ -485,6 +494,11 @@ fn export(app: &mut App, ui: &mut egui::Ui) {
             .hint_text("out.exr / out.psd / out.tif · {name} {method} {date}")
             .desired_width(f32::INFINITY),
     );
+    if app.method == MethodChoice::Focus {
+        theme::control_row(ui, "Depth map", |ui| {
+            ui.checkbox(&mut app.export_depth, "write .depth.png");
+        });
+    }
     theme::control_row(ui, "JPEG quality", |ui| {
         let mut quality = app.jpeg_quality as f32;
         theme::slider(ui, &mut quality, 1.0..=100.0, "");

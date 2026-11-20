@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "hdr-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "exr",
  "half",
@@ -1203,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "hdr-merger"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1213,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "hdr-merger-gui"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "eframe",
  "egui",

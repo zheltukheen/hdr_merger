@@ -72,6 +72,10 @@ pub struct MergeOptions {
     /// Worker threads for the CPU stacker. `None` uses the global rayon pool.
     #[serde(default)]
     pub threads: Option<usize>,
+    /// Feather radius (px) for focus stacking: 0 keeps the hard per-pixel pick,
+    /// >0 blends across a scene boundary so seams disappear.
+    #[serde(default = "default_feather")]
+    pub focus_feather: usize,
     /// Use the wgpu stacker instead of the CPU one. Off by default: measured
     /// slower than the CPU path on 43-frame 60 MP sets (ADR 0002). Env
     /// `HDR_MERGER_GPU=1` forces it on.
@@ -94,9 +98,14 @@ impl Default for MergeOptions {
             max_shift: None,
             crop_to_intersection: true,
             threads: None,
+            focus_feather: 8,
             use_gpu: false,
         }
     }
+}
+
+fn default_feather() -> usize {
+    8
 }
 
 /// Where the wall clock went. Reported by the CLI and shown in the UI, because
@@ -128,6 +137,9 @@ pub struct MergeOutput {
     pub shifts: Vec<Shift>,
     pub warnings: Vec<String>,
     pub timings: MergeTimings,
+    /// Focus stacking only: per-pixel depth, `index / (frames - 1)` replicated
+    /// into RGB so the normal exporters can write it.
+    pub depth: Option<LinearImage>,
 }
 
 /// Merge `frames`. `progress(done, total)` is called once per decoded frame
@@ -306,13 +318,33 @@ pub fn merge(
         threads: options.threads,
     };
     let stack_started = std::time::Instant::now();
-    let (image, used_gpu) = stack_cached(&plan, progress)?;
+    let mut depth_values: Option<Vec<f32>> = if options.method == StackMethod::Focus {
+        Some(vec![0.0; width as usize * height as usize])
+    } else {
+        None
+    };
+    let (image, used_gpu) = stack_cached(
+        &plan,
+        options.focus_feather,
+        depth_values.as_mut(),
+        progress,
+    )?;
     let stack_ns = stack_started.elapsed().as_nanos();
     let image = if (x0, y0, w, h) == (0, 0, width, height) {
         image
     } else {
         crop(&image, x0, y0, w, h)
     };
+    // The stacker writes full-width rows, so crop the depth map exactly like
+    // the image before handing it out.
+    let depth = depth_values.map(|values| {
+        let full = depth_image(values, width, height);
+        if (x0, y0, w, h) == (0, 0, width, height) {
+            full
+        } else {
+            crop(&full, x0, y0, w, h)
+        }
+    });
 
     Ok(MergeOutput {
         image,
@@ -325,7 +357,19 @@ pub fn merge(
             total_ms: started.elapsed().as_millis() as u64,
             gpu: used_gpu,
         },
+        depth,
     })
+}
+
+fn depth_image(values: Vec<f32>, width: u32, height: u32) -> LinearImage {
+    let mut image = LinearImage::new(width, height);
+    for (index, value) in values.into_iter().enumerate() {
+        let base = index * 3;
+        image.data[base] = value;
+        image.data[base + 1] = value;
+        image.data[base + 2] = value;
+    }
+    image
 }
 
 /// Merge straight into an EXR on disk: the stacked pixels are written row by row
@@ -352,18 +396,24 @@ pub fn merge_to_exr(
     };
     let mut writer = crate::exr_stream::ExrStreamWriter::create(path, w, h)?;
     let stack_started = std::time::Instant::now();
-    let used_gpu = stack_strips(&plan, progress, |strip_y0, rows, data| {
-        for row in 0..rows {
-            let source_y = strip_y0 + row;
-            if source_y < y0 || source_y >= y0 + h {
-                continue;
+    let used_gpu = stack_strips(
+        &plan,
+        options.focus_feather,
+        None,
+        progress,
+        |strip_y0, rows, data| {
+            for row in 0..rows {
+                let source_y = strip_y0 + row;
+                if source_y < y0 || source_y >= y0 + h {
+                    continue;
+                }
+                let start = row as usize * width as usize * 3 + x0 as usize * 3;
+                let end = start + w as usize * 3;
+                writer.write_row(&data[start..end])?;
             }
-            let start = row as usize * width as usize * 3 + x0 as usize * 3;
-            let end = start + w as usize * 3;
-            writer.write_row(&data[start..end])?;
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
     writer.finish()?;
     let stack_ns = stack_started.elapsed().as_nanos();
 
@@ -462,10 +512,15 @@ fn write_pixel(chunk: &mut [u8], rgb: &[f32]) {
     chunk[4..6].copy_from_slice(&f16::from_f32(rgb[2]).to_bits().to_le_bytes());
 }
 
-fn stack_cached(plan: &StackPlan<'_>, progress: &dyn Fn(u32, u32)) -> Result<(LinearImage, bool)> {
+fn stack_cached(
+    plan: &StackPlan<'_>,
+    feather: usize,
+    depth: Option<&mut Vec<f32>>,
+    progress: &dyn Fn(u32, u32),
+) -> Result<(LinearImage, bool)> {
     let mut out = LinearImage::new(plan.width, plan.height);
     let row_values = plan.width as usize * 3;
-    let used_gpu = stack_strips(plan, progress, |strip_y0, rows, data| {
+    let used_gpu = stack_strips(plan, feather, depth, progress, |strip_y0, rows, data| {
         let start = strip_y0 as usize * row_values;
         let _ = rows;
         out.data[start..start + data.len()].copy_from_slice(data);
@@ -478,6 +533,8 @@ fn stack_cached(plan: &StackPlan<'_>, progress: &dyn Fn(u32, u32)) -> Result<(Li
 /// full-width strip of stacked values plus its first row index.
 fn stack_strips(
     plan: &StackPlan<'_>,
+    feather: usize,
+    mut depth: Option<&mut Vec<f32>>,
     progress: &dyn Fn(u32, u32),
     mut emit: impl FnMut(u32, u32, &[f32]) -> Result<()>,
 ) -> Result<bool> {
@@ -537,7 +594,13 @@ fn stack_strips(
         let mut values = vec![0.0f32; rows * row_pixels * 3];
 
         if method == StackMethod::Focus {
-            focus_strip(&buffers, masks, &mut values, y0 as usize, rows, row_pixels);
+            let (blended, depth_rows) =
+                focus_strip(&buffers, masks, rows, row_pixels, y0 as usize, feather);
+            values.copy_from_slice(&blended);
+            if let Some(sink) = depth.as_deref_mut() {
+                let start = y0 as usize * row_pixels;
+                sink[start..start + depth_rows.len()].copy_from_slice(&depth_rows);
+            }
             emit(y0, rows as u32, &values)?;
             progress(strip as u32 + 1, strips);
             continue;
@@ -607,46 +670,40 @@ fn stack_strips(
 fn focus_strip(
     buffers: &[Vec<u8>],
     masks: &[Option<Mask>],
-    out: &mut [f32],
-    y0: usize,
     rows: usize,
     width: usize,
-) {
+    y0: usize,
+    feather: usize,
+) -> (Vec<f32>, Vec<f32>) {
     let pixels = rows * width;
-    let mut accumulator = crate::focus::FocusAccumulator::new(width, rows, 2);
+    let mut stacker = crate::focus::FocusStacker::new(width, rows, feather);
     let mut luma: Vec<f32> = Vec::with_capacity(pixels);
+    let mut rgb: Vec<f32> = Vec::with_capacity(pixels * 3);
     let mut excluded: Vec<u8> = vec![0; pixels];
 
     for (index, buffer) in buffers.iter().enumerate() {
         luma.clear();
+        rgb.clear();
         for pixel in 0..pixels {
             let offset = pixel * 6;
             let read = |at: usize| {
                 f16::from_bits(u16::from_le_bytes([buffer[at], buffer[at + 1]])).to_f32()
             };
-            luma.push(
-                0.2126 * read(offset) + 0.7152 * read(offset + 2) + 0.0722 * read(offset + 4),
-            );
+            let r = read(offset);
+            let g = read(offset + 2);
+            let b = read(offset + 4);
+            luma.push(0.2126 * r + 0.7152 * g + 0.0722 * b);
+            rgb.extend_from_slice(&[r, g, b]);
         }
         if let Some(mask) = &masks[index] {
             let base = y0 * width;
             excluded.copy_from_slice(&mask.data[base..base + pixels]);
-            accumulator.push_masked(&luma, index, Some(&excluded));
+            stacker.push(&luma, &rgb, index as u32, Some(&excluded));
         } else {
-            accumulator.push_masked(&luma, index, None);
+            stacker.push(&luma, &rgb, index as u32, None);
         }
     }
-
-    let chosen = accumulator.result();
-    for pixel in 0..pixels {
-        let buffer = &buffers[chosen[pixel] as usize];
-        let offset = pixel * 6;
-        for channel in 0..3 {
-            let at = offset + channel * 2;
-            out[pixel * 3 + channel] =
-                f16::from_bits(u16::from_le_bytes([buffer[at], buffer[at + 1]])).to_f32();
-        }
-    }
+    stacker.finish()
 }
 
 /// Temporary f16 frame cache, removed on drop.

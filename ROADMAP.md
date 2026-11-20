@@ -55,12 +55,14 @@ Goal was: no frame is thrown away because someone walked through it.
 - [x] Presets: Neutral, Light-paint interior, Night exterior, Bracket HDR; the
       name falls back to "Custom" the moment a control stops matching
 - [x] Focus stacking mode: per pixel, keep the sharpest frame (Laplacian
-      response over a 5x5 window, mask-aware)
+      response over a 5x5 window, mask-aware), **feathered blending** so the
+      handover has no seam, and a **depth map** output
 - [x] Automatic grouping of a whole shoot into stacks (EXIF time, exposure
       triple, scene similarity on 96 px thumbnails), gallery with drag between
       stacks, include/exclude and remove from the context menu
-- [ ] Batch queue (many recipes, one run)
-- [ ] Before / after split against the reference frame
+- [x] Batch: `hdr-merger batch <folder> -o <outdir>` groups the shoot and
+      merges every stack
+- [x] Before / after split in the canvas (hold `\`)
 
 ## v0.4 — shipped
 
@@ -106,7 +108,8 @@ one to attack — see the GPU result below.
 ## v1.0 — the contract
 
 - [x] `--version` prints the engine version and the recipe schema version
-- [ ] Stable CLI flags, stable recipe schema with a migration tool
+- [x] Recipe schema check with an actionable message for newer/older files
+- [ ] A real migration tool (none needed while schema 1 is current)
 - [ ] Documented engine API with semver guarantees
 
 ## Deliberately not doing

@@ -11,7 +11,9 @@ with windows.
 
 * **Stacks N frames per pixel** with a method you pick: median, percentile,
   trimmed max, mean, sum, max — or **focus stack**, which keeps the sharpest
-  frame per pixel for focus-bracketed sets. Median is what removes people who
+  frame per pixel. Focus stacking blends with feathered weights so the handover
+  between two sharp frames does not leave a seam, and it can write the
+  **depth map** (`--depth`, or the checkbox in the UI). Median is what removes people who
   walked through the shot; percentile keeps the strongest stable contribution of
   the flash.
 * **Aligns frames** by translation (phase correlation) before stacking, so a
@@ -66,6 +68,12 @@ hdr-merger merge frames/*.tif -o preview.jpg --max-dim 2000
 
 # layered export: one PSD layer per frame, with its mask
 hdr-merger layers frames/*.tif -o retouch.psd
+
+# whole shoot: group it, merge every stack
+hdr-merger batch ~/shoot -o ~/out --format jpg
+
+# focus bracket with a depth map
+hdr-merger merge focus/*.tif -o stack.jpg --method focus --depth
 ```
 
 Focus bracketing uses the same command with `--method focus`.

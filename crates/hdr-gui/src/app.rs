@@ -259,7 +259,10 @@ pub enum JobKind {
 
 pub enum JobMsg {
     Progress(u32, u32),
-    Preview(Box<MergeOutput>),
+    Preview {
+        merged: Box<MergeOutput>,
+        before: Option<(u32, u32, Vec<u8>)>,
+    },
     Exported(PathBuf),
     Deghost(Vec<(usize, Option<Mask>)>),
     Groups(Vec<Group>),
@@ -309,6 +312,8 @@ pub struct App {
     pub target: f32,
 
     pub threads: Option<usize>,
+    pub focus_feather: usize,
+    pub export_depth: bool,
     pub deghost_threshold: f32,
     pub tool: Tool,
     pub brush: f32,
@@ -323,6 +328,7 @@ pub struct App {
 
     pub preview: Option<Preview>,
     pub texture: Option<TextureHandle>,
+    pub before_texture: Option<TextureHandle>,
     pub histogram: Option<Vec<u32>>,
     pub mask_overlay: Option<TextureHandle>,
     pub mask_overlay_key: Option<(usize, usize)>,
@@ -381,6 +387,8 @@ impl App {
             exposure_ev: 0.0,
             target: 0.55,
             threads: None,
+            focus_feather: 8,
+            export_depth: false,
             deghost_threshold: 0.15,
             tool: Tool::Inspect,
             brush: 28.0,
@@ -393,6 +401,7 @@ impl App {
             recipe_path: String::new(),
             preview: None,
             texture: None,
+            before_texture: None,
             histogram: None,
             mask_overlay: None,
             mask_overlay_key: None,
@@ -461,6 +470,7 @@ impl App {
             crop_to_intersection: self.crop,
             use_gpu: false,
             threads: self.threads,
+            focus_feather: self.focus_feather,
         }
     }
 
@@ -652,6 +662,11 @@ impl App {
         }
         let inputs = self.frame_inputs();
         let options = self.merge_options((self.proxy > 0).then_some(self.proxy));
+        let auto = self.auto_exposure;
+        let ev = self.exposure_ev;
+        let target = self.target;
+        let curve = self.curve.curve();
+        let controls = self.tone.clone();
         self.set_status(StatusLevel::Busy, "stacking preview…");
         self.spawn(JobKind::Preview, move |tx| {
             let result = hdr_core::merge(&inputs, &options, &|done, total| {
@@ -659,7 +674,13 @@ impl App {
             });
             match result {
                 Ok(output) => {
-                    let _ = tx.send(JobMsg::Preview(Box::new(output)));
+                    let before = reference_frame_preview(
+                        &inputs, &output, auto, ev, target, curve, &controls,
+                    );
+                    let _ = tx.send(JobMsg::Preview {
+                        merged: Box::new(output),
+                        before,
+                    });
                 }
                 Err(error) => {
                     let _ = tx.send(JobMsg::Failed(error.to_string()));
@@ -787,6 +808,7 @@ impl App {
             return;
         }
         self.set_status(StatusLevel::Busy, "exporting full resolution…");
+        let export_depth = self.export_depth && self.method == MethodChoice::Focus;
         self.spawn(JobKind::Export, move |tx| {
             let result = hdr_core::merge(&inputs, &options, &|done, total| {
                 let _ = tx.send(JobMsg::Progress(done, total));
@@ -798,6 +820,7 @@ impl App {
                     return;
                 }
             };
+            let merged_depth = merged.depth.clone();
             let mut image = merged.image;
             if let Some(edge) = edge {
                 image = image.fit_within(edge);
@@ -816,6 +839,18 @@ impl App {
             controls.apply(&mut tonemap);
             match hdr_core::io::save_with_quality(&out, &image, &tonemap, quality) {
                 Ok(()) => {
+                    if export_depth {
+                        if let Some(depth) = &merged_depth {
+                            let depth_path = out.with_extension("depth.png");
+                            let linear = ToneMapOptions {
+                                exposure_ev: 0.0,
+                                curve: Curve::None,
+                                srgb: false,
+                                ..Default::default()
+                            };
+                            let _ = hdr_core::io::save(&depth_path, depth, &linear);
+                        }
+                    }
                     let _ = tx.send(JobMsg::Exported(out));
                 }
                 Err(error) => {
@@ -872,8 +907,17 @@ impl App {
         for message in messages {
             match message {
                 JobMsg::Progress(done, total) => self.progress = (done, total),
-                JobMsg::Preview(output) => {
+                JobMsg::Preview {
+                    merged: output,
+                    before,
+                } => {
                     let used = output.shifts.len();
+                    if let Some((width, height, bytes)) = before {
+                        let image =
+                            egui::ColorImage::from_rgb([width as usize, height as usize], &bytes);
+                        self.before_texture =
+                            Some(ctx.load_texture("before", image, egui::TextureOptions::LINEAR));
+                    }
                     let timings = output.timings;
                     self.preview = Some(Preview {
                         image: output.image,
@@ -1271,6 +1315,36 @@ impl App {
             self.add_paths(dropped);
         }
     }
+}
+
+/// The reference frame rendered with the same tone settings as the merge, so
+/// the canvas can show a before/after split.
+fn reference_frame_preview(
+    inputs: &[FrameInput],
+    merged: &MergeOutput,
+    auto: bool,
+    ev: f32,
+    target: f32,
+    curve: Curve,
+    controls: &ToneControls,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let first = inputs.first()?;
+    let mut image = hdr_core::io::load(&first.path, InputEncoding::Auto).ok()?;
+    image = image.fit_within(merged.image.width.max(merged.image.height));
+    let exposure_ev = if auto {
+        hdr_core::tonemap::auto_exposure_ev(&merged.image, target)
+    } else {
+        ev
+    };
+    let mut tonemap = ToneMapOptions {
+        exposure_ev,
+        curve,
+        srgb: true,
+        ..Default::default()
+    };
+    controls.apply(&mut tonemap);
+    let bytes = hdr_core::tonemap::to_display8(&image, &tonemap);
+    Some((image.width, image.height, bytes))
 }
 
 /// 64-bin luminance histogram of a display-encoded RGB buffer.

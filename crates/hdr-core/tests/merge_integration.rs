@@ -365,3 +365,89 @@ fn streaming_exr_matches_the_in_memory_merge() {
         assert!((a - b).abs() < 1e-4, "pixel {index}: {a} vs {b}");
     }
 }
+
+#[test]
+fn feathered_focus_blends_the_seam_and_reports_depth() {
+    let dir = workdir("focus-feather");
+    let (w, h) = (32u32, 8u32);
+    let stripes = |sharp_left: bool, high: f32, low: f32| {
+        let mut pixels = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let sharp = if sharp_left { x < w / 2 } else { x >= w / 2 };
+                let value = if sharp {
+                    if (x + y) % 2 == 0 {
+                        high
+                    } else {
+                        low
+                    }
+                } else {
+                    0.5
+                };
+                pixels.push([value, value, value]);
+            }
+        }
+        pixels
+    };
+    let a = dir.join("a.tif");
+    let b = dir.join("b.tif");
+    write_frame(&a, &stripes(true, 0.9, 0.1), w, h);
+    write_frame(&b, &stripes(false, 0.7, 0.3), w, h);
+
+    let hard = merge_paths(
+        &[a.clone(), b.clone()],
+        &MergeOptions {
+            method: StackMethod::Focus,
+            align: false,
+            focus_feather: 0,
+            ..Default::default()
+        },
+        &|_, _| {},
+    )
+    .expect("hard focus");
+    let soft = merge_paths(
+        &[a, b],
+        &MergeOptions {
+            method: StackMethod::Focus,
+            align: false,
+            focus_feather: 8,
+            ..Default::default()
+        },
+        &|_, _| {},
+    )
+    .expect("feathered focus");
+
+    // Right at the handover the hard pick jumps to one frame's value; the
+    // feathered version sits between the two.
+    let hard_right = hard.image.pixel(20, 0)[0];
+    let hard_left = hard.image.pixel(12, 0)[0];
+    let hard_edge = hard.image.pixel(16, 0)[0];
+    let soft_edge = soft.image.pixel(16, 0)[0];
+    assert!(
+        (hard_right - 0.7).abs() < 0.05,
+        "hard pick should be frame b: {hard_right}"
+    );
+    assert!(
+        (hard_left - 0.9).abs() < 0.05,
+        "hard pick should be frame a: {hard_left}"
+    );
+    // The whole point: at the handover the soft version is not either frame's
+    // value any more, it is a blend of frame a (0.5) and frame b (0.7).
+    assert!(
+        (soft_edge - hard_edge).abs() > 0.02,
+        "feathering changed nothing at the seam: hard {hard_edge}, soft {soft_edge}"
+    );
+    assert!(
+        (0.49..=0.71).contains(&soft_edge),
+        "blend left the two frames' range: {soft_edge}"
+    );
+    // Far from the seam both agree with their frame (x+y even/odd chooses the
+    // stripe value: 2+0 even, 29+0 odd).
+    assert!((soft.image.pixel(2, 0)[0] - 0.9).abs() < 0.05);
+    assert!((soft.image.pixel(29, 0)[0] - 0.3).abs() < 0.05);
+
+    let depth = soft.depth.expect("focus merge must report a depth map");
+    assert_eq!((depth.width, depth.height), (w, h), "depth size must match");
+    assert!(depth.pixel(2, 0)[0] < 0.25, "left should be near frame a");
+    assert!(depth.pixel(29, 0)[0] > 0.75, "right should be near frame b");
+}

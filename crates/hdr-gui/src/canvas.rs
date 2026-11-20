@@ -49,6 +49,42 @@ pub fn central(app: &mut App, ui: &mut egui::Ui) {
         Color32::WHITE,
     );
 
+    // Hold `\` to compare the reference frame (left) with the merge (right).
+    if ui.input(|i| i.key_down(egui::Key::Backslash)) {
+        if let Some(before) = &app.before_texture {
+            let right = image_rect.center().x;
+            let left_rect =
+                egui::Rect::from_min_max(image_rect.min, egui::pos2(right, image_rect.max.y));
+            painter.image(
+                before.id(),
+                left_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(0.5, 1.0)),
+                Color32::WHITE,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(right, image_rect.top()),
+                    egui::pos2(right, image_rect.bottom()),
+                ],
+                egui::Stroke::new(1.5_f32, color::ACCENT),
+            );
+            painter.text(
+                egui::pos2(right + SP_S, image_rect.top() + SP_S),
+                egui::Align2::LEFT_TOP,
+                "after",
+                egui::FontId::proportional(11.0),
+                color::ACCENT,
+            );
+            painter.text(
+                egui::pos2(right - SP_S, image_rect.top() + SP_S),
+                egui::Align2::RIGHT_TOP,
+                "before",
+                egui::FontId::proportional(11.0),
+                color::TEXT_DIM,
+            );
+        }
+    }
+
     if app.overlay {
         if let Some(overlay) = mask_overlay_texture(app, ui.ctx(), image_size) {
             painter.image(

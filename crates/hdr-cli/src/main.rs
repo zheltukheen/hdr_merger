@@ -24,6 +24,8 @@ enum Command {
     Info { file: PathBuf },
     /// Write every frame as a PSD/PSB layer with its mask.
     Layers(LayersArgs),
+    /// Group a folder into stacks and merge each one.
+    Batch(BatchArgs),
     /// List stack methods.
     Methods,
 }
@@ -81,6 +83,14 @@ struct MergeArgs {
     #[arg(long)]
     threads: Option<usize>,
 
+    /// Focus stacking feather radius in pixels (0 = hard pick).
+    #[arg(long, default_value_t = 8)]
+    focus_feather: usize,
+
+    /// Save the focus depth map next to the output (.png).
+    #[arg(long)]
+    depth: bool,
+
     /// Use the wgpu compute stacker instead of the CPU one (slower on the
     /// sets measured so far, kept for experimentation).
     #[arg(long)]
@@ -93,6 +103,33 @@ struct MergeArgs {
     /// Target luminance for `--exposure auto`.
     #[arg(long, default_value_t = 0.55)]
     target: f32,
+}
+
+#[derive(Parser)]
+struct BatchArgs {
+    /// Folder with the whole shoot.
+    folder: PathBuf,
+    /// Output folder for the merged files.
+    #[arg(short, long)]
+    out: PathBuf,
+    /// Stack method: median, mean, sum, max, p90, focus ...
+    #[arg(short, long, default_value = "median")]
+    method: String,
+    /// Output extension: jpg, tif, exr, psd.
+    #[arg(long, default_value = "jpg")]
+    format: String,
+    /// Longest edge of every result.
+    #[arg(long)]
+    max_dim: Option<u32>,
+    /// Exposure in EV, or `auto`.
+    #[arg(long, default_value = "auto")]
+    exposure: String,
+    /// Tone curve: none, aces, reinhard, reinhard02, hable.
+    #[arg(long, default_value = "aces")]
+    curve: String,
+    /// Focus stacking feather radius in pixels (0 = hard pick).
+    #[arg(long, default_value_t = 8)]
+    focus_feather: usize,
 }
 
 #[derive(Parser)]
@@ -153,6 +190,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Command::Layers(args) => layers_command(args),
+        Command::Batch(args) => batch_command(args),
         Command::Methods => {
             for method in [
                 "median",
@@ -179,6 +217,7 @@ fn merge_command(args: MergeArgs) -> Result<()> {
         input_encoding: parse_input_encoding(&args.input)?,
         use_gpu: args.gpu,
         threads: args.threads,
+        focus_feather: args.focus_feather,
         max_shift: args.max_shift,
         crop_to_intersection: !args.no_crop,
     };
@@ -268,6 +307,22 @@ fn merge_command(args: MergeArgs) -> Result<()> {
 
     hdr_core::io::save(&args.out, &merged.image, &tonemap)?;
 
+    if args.depth {
+        if let Some(depth) = &merged.depth {
+            let depth_path = args.out.with_extension("depth.png");
+            let linear = hdr_core::ToneMapOptions {
+                exposure_ev: 0.0,
+                curve: hdr_core::Curve::None,
+                srgb: false,
+                ..Default::default()
+            };
+            hdr_core::io::save(&depth_path, depth, &linear)?;
+            eprintln!("depth map -> {}", depth_path.display());
+        } else {
+            eprintln!("--depth only applies to --method focus");
+        }
+    }
+
     if let Some(path) = &args.save_recipe {
         let recipe = Recipe {
             export: ExportSettings {
@@ -293,6 +348,108 @@ fn merge_command(args: MergeArgs) -> Result<()> {
 
     println!("{}", args.out.display());
     Ok(())
+}
+
+fn batch_command(args: BatchArgs) -> Result<()> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&args.folder)
+        .with_context(|| format!("read {}", args.folder.display()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            matches!(
+                path.extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.to_ascii_lowercase())
+                    .as_deref(),
+                Some("tif") | Some("tiff") | Some("png") | Some("jpg") | Some("jpeg") | Some("exr")
+            )
+        })
+        .collect();
+    paths.sort();
+    if paths.is_empty() {
+        anyhow::bail!("no supported images in {}", args.folder.display());
+    }
+    std::fs::create_dir_all(&args.out)?;
+
+    let groups = hdr_core::grouping::group_paths(
+        &paths,
+        &hdr_core::grouping::GroupOptions::default(),
+        &progress,
+    )?;
+    eprintln!("{} frame(s) in {} stack(s)", paths.len(), groups.len());
+
+    let options = MergeOptions {
+        method: StackMethod::parse(&args.method)?,
+        align: true,
+        reference: None,
+        max_dim: args.max_dim,
+        input_encoding: InputEncoding::Auto,
+        max_shift: None,
+        crop_to_intersection: true,
+        threads: None,
+        focus_feather: args.focus_feather,
+        use_gpu: false,
+    };
+    let curve = parse_curve(&args.curve)?;
+    let folder_name = args
+        .folder
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "shoot".to_owned());
+
+    for (index, group) in groups.iter().enumerate() {
+        let frames: Vec<FrameInput> = group
+            .frames
+            .iter()
+            .map(|frame| FrameInput::new(paths[*frame].clone()))
+            .collect();
+        let output = args
+            .out
+            .join(format!("{folder_name}_{:02}.{}", index + 1, args.format));
+        eprintln!(
+            "stack {}/{}: {} frame(s), {}",
+            index + 1,
+            groups.len(),
+            frames.len(),
+            group.reason
+        );
+        if args.format.eq_ignore_ascii_case("psd") || args.format.eq_ignore_ascii_case("psb") {
+            let exposure = exposure_for(&args.exposure, &frames, 0.55)?;
+            let tonemap = hdr_core::ToneMapOptions {
+                exposure_ev: exposure,
+                curve,
+                srgb: true,
+                ..Default::default()
+            };
+            hdr_core::layers::export(&output, &frames, &tonemap, args.max_dim, &progress)?;
+            continue;
+        }
+        let merged = merge(&frames, &options, &progress)?;
+        let mut tonemap = hdr_core::ToneMapOptions {
+            exposure_ev: 0.0,
+            curve,
+            srgb: true,
+            ..Default::default()
+        };
+        tonemap.exposure_ev = match args.exposure.as_str() {
+            "auto" => hdr_core::tonemap::auto_exposure_ev(&merged.image, 0.55),
+            other => other
+                .parse::<f32>()
+                .context("--exposure must be a number or `auto`")?,
+        };
+        hdr_core::io::save(&output, &merged.image, &tonemap)?;
+    }
+    println!("{}", args.out.display());
+    Ok(())
+}
+
+fn exposure_for(exposure: &str, frames: &[FrameInput], target: f32) -> Result<f32> {
+    match exposure {
+        "auto" => Ok(hdr_core::layers::auto_exposure(frames, target)?),
+        other => other
+            .parse::<f32>()
+            .context("--exposure must be a number or `auto`"),
+    }
 }
 
 fn layers_command(args: LayersArgs) -> Result<()> {

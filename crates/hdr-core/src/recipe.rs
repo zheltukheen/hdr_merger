@@ -68,13 +68,31 @@ impl Recipe {
         let bytes = std::fs::read(path)?;
         let recipe: Recipe = serde_json::from_slice(&bytes)
             .map_err(|e| HdrError::Engine(format!("decode recipe {}: {e}", path.display())))?;
-        if recipe.schema != RECIPE_SCHEMA {
-            return Err(HdrError::Engine(format!(
-                "recipe schema {} is not supported, expected schema {RECIPE_SCHEMA}",
-                recipe.schema
-            )));
-        }
+        recipe.check_schema()?;
         Ok(recipe)
+    }
+
+    /// The single place that decides whether an old file can still be opened.
+    ///
+    /// Schema 1 is the only schema that ever shipped, so there are no
+    /// migrations to run yet. The branch exists so the error a user sees says
+    /// what to do instead of "failed to parse".
+    fn check_schema(&self) -> Result<()> {
+        if self.schema == RECIPE_SCHEMA {
+            return Ok(());
+        }
+        let message = if self.schema > RECIPE_SCHEMA {
+            format!(
+                "recipe schema {} is newer than this build (schema {}); update the app",
+                self.schema, RECIPE_SCHEMA
+            )
+        } else {
+            format!(
+                "recipe schema {} is older than this build (schema {}); no migration path exists yet",
+                self.schema, RECIPE_SCHEMA
+            )
+        };
+        Err(HdrError::Engine(message))
     }
 }
 
@@ -277,6 +295,7 @@ mod tests {
             crop_to_intersection: false,
             use_gpu: true,
             threads: Some(4),
+            focus_feather: 4,
         };
         let tone = ToneMapOptions {
             exposure_ev: 1.25,
