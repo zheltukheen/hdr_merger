@@ -24,6 +24,9 @@ pub enum StackMethod {
     Max,
     /// Max with the `n` brightest values dropped.
     TrimmedMax(usize),
+    /// Focus stacking: keep the frame whose neighbourhood is sharpest. Needs a
+    /// spatial pass, so the pipeline handles it outside `pick_*`.
+    Focus,
 }
 
 impl StackMethod {
@@ -35,6 +38,7 @@ impl StackMethod {
             "mean" | "avg" | "average" => return Ok(StackMethod::Mean),
             "median" | "p50" => return Ok(StackMethod::Median),
             "max" | "lighten" => return Ok(StackMethod::Max),
+            "focus" | "focus-stack" | "focusstack" => return Ok(StackMethod::Focus),
             _ => {}
         }
         if let Some(rest) = t.strip_prefix("percentile:") {
@@ -64,6 +68,7 @@ impl StackMethod {
             StackMethod::Median => "median".into(),
             StackMethod::Max => "max".into(),
             StackMethod::TrimmedMax(n) => format!("trimmed:{n}"),
+            StackMethod::Focus => "focus".into(),
             StackMethod::Percentile(p) => format!("p{p}"),
         }
     }
@@ -81,6 +86,8 @@ impl StackMethod {
             StackMethod::Sum => values.iter().sum(),
             StackMethod::Mean => values.iter().sum::<f32>() / n as f32,
             StackMethod::Max => values.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+            // Spatial method: handled by `focus::FocusAccumulator`.
+            StackMethod::Focus => values.iter().copied().fold(f32::NEG_INFINITY, f32::max),
             StackMethod::Median => {
                 let mid = n / 2;
                 values.select_nth_unstable_by(mid, f32::total_cmp);
@@ -116,6 +123,8 @@ impl StackMethod {
             StackMethod::Percentile(p) => (3, p),
             StackMethod::TrimmedMax(drop) => (4, drop as f32),
             StackMethod::Max => (5, 0.0),
+            // Not dispatched to the GPU; kept total for the API.
+            StackMethod::Focus => (5, 0.0),
         }
     }
 
@@ -140,6 +149,8 @@ impl StackMethod {
                 sorted[idx.min(n - 1)]
             }
             StackMethod::Max => sorted[n - 1],
+            // Spatial method: the pipeline never calls this for `Focus`.
+            StackMethod::Focus => sorted[n - 1],
             StackMethod::TrimmedMax(drop) => sorted[n - 1 - drop.min(n - 1)],
         }
     }
@@ -224,6 +235,7 @@ mod tests {
             StackMethod::Percentile(10.0),
             StackMethod::Percentile(90.0),
             StackMethod::TrimmedMax(3),
+            StackMethod::Focus,
         ] {
             for values in [base.clone(), noisy.clone()] {
                 let mut sorted = values.clone();

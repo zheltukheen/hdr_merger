@@ -21,3 +21,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 wgpu = { version = "22", optional = true }
 pollster = { version = "0.3", optional = true }
+
+[dev-dependencies]
+psd = "0.3"

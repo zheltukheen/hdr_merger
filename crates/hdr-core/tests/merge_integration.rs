@@ -280,3 +280,57 @@ fn gpu_stack_matches_the_cpu_stack_when_an_adapter_exists() {
         }
     }
 }
+
+#[test]
+fn focus_stack_keeps_the_sharp_half_of_each_frame() {
+    let dir = workdir("focus");
+    let (w, h) = (32u32, 8u32);
+    // Each frame is sharp on one half and flat on the other, with a distinct
+    // stripe amplitude so the test can tell which frame supplied the pixel.
+    let stripes = |sharp_left: bool, high: f32, low: f32| {
+        let mut pixels = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let sharp = if sharp_left { x < w / 2 } else { x >= w / 2 };
+                let value = if sharp {
+                    if (x + y) % 2 == 0 {
+                        high
+                    } else {
+                        low
+                    }
+                } else {
+                    0.5
+                };
+                pixels.push([value, value, value]);
+            }
+        }
+        pixels
+    };
+    let a = dir.join("left.tif");
+    let b = dir.join("right.tif");
+    write_frame(&a, &stripes(true, 0.9, 0.1), w, h);
+    write_frame(&b, &stripes(false, 0.7, 0.3), w, h);
+
+    let merged = merge_paths(
+        &[a, b],
+        &MergeOptions {
+            method: StackMethod::Focus,
+            align: false,
+            ..Default::default()
+        },
+        &|_, _| {},
+    )
+    .expect("focus merge");
+
+    // x+y is even at both sample points, so the sharp frame gives its high value.
+    let left = merged.image.pixel(4, 0)[0];
+    let right = merged.image.pixel(28, 0)[0];
+    assert!(
+        (left - 0.9).abs() < 0.02,
+        "left should come from frame a: {left}"
+    );
+    assert!(
+        (right - 0.7).abs() < 0.02,
+        "right should come from frame b: {right}"
+    );
+}

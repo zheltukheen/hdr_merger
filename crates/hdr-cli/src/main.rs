@@ -22,6 +22,8 @@ enum Command {
     Merge(Box<MergeArgs>),
     /// Print image facts.
     Info { file: PathBuf },
+    /// Write every frame as a PSD/PSB layer with its mask.
+    Layers(LayersArgs),
     /// List stack methods.
     Methods,
 }
@@ -89,6 +91,30 @@ struct MergeArgs {
     target: f32,
 }
 
+#[derive(Parser)]
+struct LayersArgs {
+    /// Input frames (tiff, png, jpeg, exr).
+    inputs: Vec<PathBuf>,
+    /// Output .psd or .psb.
+    #[arg(short, long)]
+    out: PathBuf,
+    /// Exposure in EV, or `auto`.
+    #[arg(long, default_value = "auto")]
+    exposure: String,
+    /// Tone curve: none, aces, reinhard, reinhard02, hable.
+    #[arg(long, default_value = "aces")]
+    curve: String,
+    /// Longest edge of every layer.
+    #[arg(long)]
+    max_dim: Option<u32>,
+    /// Target luminance for `--exposure auto`.
+    #[arg(long, default_value_t = 0.55)]
+    target: f32,
+    /// Directory with `<frame-stem>.mask.json` files.
+    #[arg(long)]
+    mask_dir: Option<PathBuf>,
+}
+
 fn main() -> ExitCode {
     // clap's `--version` cannot include a runtime constant, and the recipe
     // schema is part of the contract (v1.0), so answer it explicitly.
@@ -122,6 +148,7 @@ fn run() -> Result<()> {
             );
             Ok(())
         }
+        Command::Layers(args) => layers_command(args),
         Command::Methods => {
             for method in [
                 "median",
@@ -235,11 +262,44 @@ fn merge_command(args: MergeArgs) -> Result<()> {
     Ok(())
 }
 
+fn layers_command(args: LayersArgs) -> Result<()> {
+    let frames: Vec<FrameInput> = args
+        .inputs
+        .iter()
+        .map(|path| FrameInput {
+            path: path.clone(),
+            mask: load_mask(&args.mask_dir, path).ok().flatten(),
+        })
+        .collect();
+    let exposure_ev = match args.exposure.as_str() {
+        "auto" => hdr_core::layers::auto_exposure(&frames, args.target)?,
+        other => other
+            .parse::<f32>()
+            .context("--exposure must be a number or `auto`")?,
+    };
+    let tonemap = hdr_core::ToneMapOptions {
+        exposure_ev,
+        curve: parse_curve(&args.curve)?,
+        srgb: true,
+        ..Default::default()
+    };
+    hdr_core::layers::export(&args.out, &frames, &tonemap, args.max_dim, &progress)?;
+    eprintln!(
+        "wrote {} layer(s) at {:.2} EV -> {}",
+        frames.len(),
+        exposure_ev,
+        args.out.display()
+    );
+    println!("{}", args.out.display());
+    Ok(())
+}
+
 fn parse_curve(text: &str) -> Result<Curve> {
     match text.to_ascii_lowercase().as_str() {
         "none" | "clip" => Ok(Curve::None),
         "aces" => Ok(Curve::Aces),
         "reinhard" => Ok(Curve::Reinhard),
+        "reinhard02" | "reinhard2" => Ok(Curve::Reinhard02),
         "hable" | "filmic" => Ok(Curve::Hable),
         other => anyhow::bail!("unknown curve `{other}`"),
     }

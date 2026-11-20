@@ -400,6 +400,19 @@ fn stack_cached(
         let start = y0 as usize * row_pixels * 3;
         let end = start + rows * row_pixels * 3;
 
+        if method == StackMethod::Focus {
+            focus_strip(
+                &buffers,
+                masks,
+                &mut out.data[start..end],
+                y0 as usize,
+                rows,
+                row_pixels,
+            );
+            progress(strip as u32 + 1, strips);
+            continue;
+        }
+
         #[cfg(feature = "gpu")]
         if let Some(stacker) = &gpu {
             if count <= crate::gpu::MAX_FRAMES {
@@ -449,6 +462,52 @@ fn stack_cached(
         progress(strip as u32 + 1, strips);
     }
     Ok((out, used_gpu))
+}
+
+/// Focus stacking for one strip: the sharpest frame per pixel wins.
+fn focus_strip(
+    buffers: &[Vec<u8>],
+    masks: &[Option<Mask>],
+    out: &mut [f32],
+    y0: usize,
+    rows: usize,
+    width: usize,
+) {
+    let pixels = rows * width;
+    let mut accumulator = crate::focus::FocusAccumulator::new(width, rows, 2);
+    let mut luma: Vec<f32> = Vec::with_capacity(pixels);
+    let mut excluded: Vec<u8> = vec![0; pixels];
+
+    for (index, buffer) in buffers.iter().enumerate() {
+        luma.clear();
+        for pixel in 0..pixels {
+            let offset = pixel * 6;
+            let read = |at: usize| {
+                f16::from_bits(u16::from_le_bytes([buffer[at], buffer[at + 1]])).to_f32()
+            };
+            luma.push(
+                0.2126 * read(offset) + 0.7152 * read(offset + 2) + 0.0722 * read(offset + 4),
+            );
+        }
+        if let Some(mask) = &masks[index] {
+            let base = y0 * width;
+            excluded.copy_from_slice(&mask.data[base..base + pixels]);
+            accumulator.push_masked(&luma, index, Some(&excluded));
+        } else {
+            accumulator.push_masked(&luma, index, None);
+        }
+    }
+
+    let chosen = accumulator.result();
+    for pixel in 0..pixels {
+        let buffer = &buffers[chosen[pixel] as usize];
+        let offset = pixel * 6;
+        for channel in 0..3 {
+            let at = offset + channel * 2;
+            out[pixel * 3 + channel] =
+                f16::from_bits(u16::from_le_bytes([buffer[at], buffer[at + 1]])).to_f32();
+        }
+    }
 }
 
 /// Temporary f16 frame cache, removed on drop.
