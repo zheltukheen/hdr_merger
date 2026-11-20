@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
 
 jobs:
   check:
@@ -38,6 +37,9 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
+        # `-D warnings` here, not in RUSTFLAGS: the latter would also deny
+        # lints inside third-party crates (wgpu's objc chain reports a
+        # future-incompat note) and fail a build we cannot fix.
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test

@@ -73,6 +73,16 @@ most one stale `hdr-merger-*` directory behind.
 | Auto exposure targets p90 luminance | stable across very different sets | not scene-aware |
 | Masks are per frame, not per pixel-in-stack | the user knows which frame is dirty | no auto-detection yet |
 
+## Rendering
+
+`eframe` runs on **wgpu**: Metal on macOS, Vulkan/DX12 on Windows, Vulkan (or GL)
+on Linux — one code path, see [docs/adr/0001-render-backend.md](docs/adr/0001-render-backend.md).
+OpenGL is still buildable (`--features glow-backend`) and selectable at runtime
+(`HDR_MERGER_RENDERER=glow`) for machines where no adapter initialises.
+
+The canvas draws one textured quad plus egui geometry; all image work happens on
+the CPU. `RUST_LOG=wgpu_core=info` prints the adapter in use.
+
 ## Threading
 
 `stack_cached` parallelises rows with rayon inside each strip; every other step

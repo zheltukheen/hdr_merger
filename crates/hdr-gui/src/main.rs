@@ -16,11 +16,18 @@ use app::{App, StatusLevel, Tool};
 use theme::color;
 
 fn main() -> eframe::Result<()> {
+    // Off unless RUST_LOG says otherwise; `RUST_LOG=wgpu_core=info` prints the
+    // adapter that was actually picked, which is the first thing to ask for
+    // when a machine refuses to start.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    let renderer = select_renderer();
+    eprintln!("hdr-merger-gui: renderer = {renderer:?}");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1360.0, 880.0])
             .with_min_inner_size([1040.0, 640.0])
             .with_title("HDR Merger"),
+        renderer,
         ..Default::default()
     };
     eframe::run_native(
@@ -28,6 +35,22 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+/// wgpu by default: it speaks Vulkan on Windows/Linux and Metal on macOS from
+/// one code path. `HDR_MERGER_RENDERER=glow` switches to OpenGL for machines
+/// where no adapter initialises, but only when built with `--features glow-backend`.
+fn select_renderer() -> eframe::Renderer {
+    let requested = std::env::var("HDR_MERGER_RENDERER").unwrap_or_default();
+    #[cfg(feature = "glow-backend")]
+    if requested.eq_ignore_ascii_case("glow") {
+        return eframe::Renderer::Glow;
+    }
+    #[cfg(not(feature = "glow-backend"))]
+    if requested.eq_ignore_ascii_case("glow") {
+        eprintln!("hdr-merger-gui: built without glow-backend, staying on wgpu");
+    }
+    eframe::Renderer::Wgpu
 }
 
 impl eframe::App for App {

@@ -33,6 +33,16 @@ cargo build --release
 # binaries: target/release/hdr-merger, target/release/hdr-merger-gui
 ```
 
+The UI renders through **wgpu** (Metal / Vulkan / DX12). If a machine has no
+working adapter, build the OpenGL fallback and select it at runtime:
+
+```sh
+cargo build --release -p hdr-merger-gui --features glow-backend
+HDR_MERGER_RENDERER=glow ./target/release/hdr-merger-gui
+```
+
+`RUST_LOG=wgpu_core=info` prints which adapter was picked.
+
 ## CLI
 
 ```sh
