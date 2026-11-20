@@ -78,9 +78,11 @@ Focus bracketing uses the same command with `--method focus`.
 hdr-merger-gui
 ```
 
-Drop a folder (or a batch of files) anywhere in the window, pick the stack
-method, press **Preview** (proxy, fast), paint masks on the frames that need it,
-then **Export full**.
+Drop a whole shoot anywhere in the window. The app **groups it into stacks**
+automatically — a time gap, an exposure change or a scene change starts a new
+one — and shows each stack in the gallery. Drag a frame onto another stack to
+move it, right-click a frame to include/exclude or remove it. Then pick the stack
+method, **Preview**, paint masks where needed and **Export full**.
 
 Everything numeric is typed as well as dragged: slider + value box on every
 setting. Recipes (`*.hdrm.json`) store the frames, the masks and every setting,
@@ -106,10 +108,14 @@ Measured on a 43-frame, 5496×3670 set (Apple M1 Pro, release build):
 
 | phase | time |
 | --- | --- |
-| decode (TIFF → linear) | 2.5 s |
-| cache (shift + f16) | 3.9 s |
-| stack (median) | 9.1 s |
-| **total** | **16.1 s** |
+| decode (TIFF → linear) | 2.4 s |
+| cache (shift + f16) | 3.3 s |
+| stack (median) | 8.8 s |
+| **total** | **16.0 s** |
+
+Writing `.exr` streams the stacker's strips straight to disk: the 240 MB master
+never exists as one buffer. Peak RSS stays around 0.8 GB, dominated by the one
+full frame being decoded.
 
 The 1400 px preview of the same set takes 4.7 s, of which 2.3 s is decode.
 `hdr-merger merge` prints this breakdown after every run.

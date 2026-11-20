@@ -17,15 +17,6 @@ pub struct Meta {
 }
 
 impl Meta {
-    pub fn summary(&self) -> String {
-        format!(
-            "{}×{} · {}",
-            self.width,
-            self.height,
-            human_bytes(self.bytes)
-        )
-    }
-
     pub fn sort_key(&self, path: &Path) -> String {
         self.taken
             .clone()

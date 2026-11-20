@@ -13,6 +13,7 @@ gpu = ["dep:wgpu", "dep:pollster"]
 
 [dependencies]
 image.workspace = true
+kamadak-exif = "0.6"
 rustfft.workspace = true
 rayon.workspace = true
 half.workspace = true
@@ -24,3 +25,6 @@ pollster = { version = "0.3", optional = true }
 
 [dev-dependencies]
 psd = "0.3"
+# Proves the streaming writer is readable by a second, independent EXR
+# implementation. Already in the lockfile through `image`; dev-only.
+exr = { version = "1.74", default-features = false }

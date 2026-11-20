@@ -276,6 +276,7 @@ mod tests {
             max_shift: Some(12),
             crop_to_intersection: false,
             use_gpu: true,
+            threads: Some(4),
         };
         let tone = ToneMapOptions {
             exposure_ev: 1.25,

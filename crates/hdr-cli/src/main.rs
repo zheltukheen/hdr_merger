@@ -77,6 +77,10 @@ struct MergeArgs {
     #[arg(long, default_value = "auto")]
     input: String,
 
+    /// Worker threads for the CPU stacker (default: all cores).
+    #[arg(long)]
+    threads: Option<usize>,
+
     /// Use the wgpu compute stacker instead of the CPU one (slower on the
     /// sets measured so far, kept for experimentation).
     #[arg(long)]
@@ -174,6 +178,7 @@ fn merge_command(args: MergeArgs) -> Result<()> {
         max_dim: args.max_dim,
         input_encoding: parse_input_encoding(&args.input)?,
         use_gpu: args.gpu,
+        threads: args.threads,
         max_shift: args.max_shift,
         crop_to_intersection: !args.no_crop,
     };
@@ -190,6 +195,34 @@ fn merge_command(args: MergeArgs) -> Result<()> {
             }
         })
         .collect();
+
+    let is_exr = args
+        .out
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("exr"))
+        .unwrap_or(false);
+
+    // EXR is written straight from the stacker: no 60 MP master in RAM.
+    if is_exr {
+        let timings = hdr_core::pipeline::merge_to_exr(&frames, &options, &args.out, &progress)?;
+        eprintln!(
+            "stacked {} frame(s) with {} -> {} (streamed)",
+            frames.len(),
+            options.method.label(),
+            args.out.display()
+        );
+        eprintln!(
+            "time: decode {} ms, cache {} ms, stack {} ms, total {} ms ({:.0}% before the stack, CPU stacker)",
+            timings.decode_ms,
+            timings.cache_ms,
+            timings.stack_ms,
+            timings.total_ms,
+            timings.decode_share() * 100.0
+        );
+        println!("{}", args.out.display());
+        return Ok(());
+    }
 
     let merged = if frames.iter().any(|f| f.mask.is_some()) {
         merge(&frames, &options, &progress)?

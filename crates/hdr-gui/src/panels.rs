@@ -25,8 +25,16 @@ pub fn left_panel(app: &mut App, ui: &mut egui::Ui) {
         });
 }
 
+type StackView = (usize, String, String, Vec<(usize, String)>);
+
 fn sources(app: &mut App, ui: &mut egui::Ui) {
-    theme::step_header(ui, 1, "Sources", &format!("{} frames", app.frames.len()));
+    theme::step_header(
+        ui,
+        1,
+        "Sources",
+        &format!("{} frames · {} stacks", app.frames.len(), app.stacks.len()),
+    );
+
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut app.recipe_path)
@@ -68,75 +76,110 @@ fn sources(app: &mut App, ui: &mut egui::Ui) {
     theme::hint(
         ui,
         format!(
-            "{} of {} frames · {} on disk",
+            "{} of {} frames included · {} on disk · cache ≈ {}",
             app.included_count(),
             app.frames.len(),
-            meta::human_bytes(total)
+            meta::human_bytes(total),
+            meta::human_bytes(app.cache_estimate_bytes())
         ),
     );
 
     ui.add_space(SP_S);
-    let mut remove = None;
-    let mut toggle = None;
-    egui::ScrollArea::vertical()
-        .id_salt("frames")
-        .max_height(228.0)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            if app.frames.is_empty() {
-                theme::hint(ui, "No frames yet.");
-            }
-            for index in 0..app.frames.len() {
-                let selected = index == app.selected;
-                let mut included = app.frames[index].included;
-                let masked = app.frames[index].masked();
-                let name = app.frames[index].name();
-                let detail = app.frames[index].meta.summary();
-                let response = ui
-                    .horizontal(|ui| {
-                        let check = ui.checkbox(&mut included, "");
-                        if check.changed() {
-                            toggle = Some((index, included));
-                        }
-                        let mut text = RichText::new(name).size(12.0);
-                        if !included {
-                            text = text.color(color::TEXT_DIM).strikethrough();
-                        } else if selected {
-                            text = text.color(color::TEXT);
-                        }
-                        if ui.selectable_label(selected, text).clicked() {
-                            app.selected = index;
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if theme::icon_button(ui, "×", "Remove frame").clicked() {
-                                remove = Some(index);
+    ui.horizontal(|ui| {
+        if theme::ghost_button(ui, "Auto-group").clicked() {
+            app.start_grouping();
+        }
+        theme::hint(ui, "drag a frame onto another stack");
+    });
+
+    ui.add_space(SP_XS);
+    // Snapshot the stacks: the drop zones need `&mut App` for their contents.
+    let snapshot: Vec<StackView> = app
+        .stacks
+        .iter()
+        .enumerate()
+        .map(|(index, stack)| {
+            let frames = stack
+                .frames
+                .iter()
+                .filter_map(|frame| app.frames.get(*frame).map(|entry| (*frame, entry.name())))
+                .collect();
+            (index, stack.name.clone(), stack.reason.clone(), frames)
+        })
+        .collect();
+
+    let mut select_stack: Option<usize> = None;
+    let mut moved: Option<(usize, usize)> = None;
+    let mut toggle: Option<(usize, bool)> = None;
+    let mut remove: Option<usize> = None;
+
+    for (index, name, reason, frames) in &snapshot {
+        let active = *index == app.active_stack;
+        let header = format!("{name} · {} frames", frames.len());
+        let (_, dropped) = ui.dnd_drop_zone::<usize, _>(
+            egui::Frame::none()
+                .fill(if active { color::CARD } else { color::PANEL })
+                .rounding(theme::RADIUS)
+                .inner_margin(egui::Margin::same(SP_S)),
+            |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(active, RichText::new(header).size(11.5))
+                        .clicked()
+                    {
+                        select_stack = Some(*index);
+                    }
+                    ui.label(RichText::new(reason).size(10.0).color(color::TEXT_DIM));
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for (frame_index, frame_name) in frames {
+                        let included = app.frames[*frame_index].included;
+                        let masked = app.frames[*frame_index].masked();
+                        let text = if masked {
+                            RichText::new(format!("{frame_name} ●"))
+                                .size(10.5)
+                                .color(color::ACCENT)
+                        } else if included {
+                            RichText::new(frame_name).size(10.5)
+                        } else {
+                            RichText::new(frame_name)
+                                .size(10.5)
+                                .color(color::TEXT_DIM)
+                                .strikethrough()
+                        };
+                        let response = ui.dnd_drag_source(
+                            egui::Id::new(("frame", frame_index)),
+                            *frame_index,
+                            |ui| {
+                                ui.label(text);
+                            },
+                        );
+                        response.response.context_menu(|ui| {
+                            if ui.button("Include / exclude").clicked() {
+                                toggle = Some((*frame_index, !included));
+                                ui.close_menu();
                             }
-                            if masked {
-                                theme::badge(ui, "mask", color::ACCENT);
+                            if ui.button("Remove from set").clicked() {
+                                remove = Some(*frame_index);
+                                ui.close_menu();
                             }
-                            ui.label(RichText::new(detail).size(10.0).color(color::TEXT_DIM));
                         });
-                    })
-                    .response;
-                let frame = &app.frames[index];
-                let mut tip = frame.path.display().to_string();
-                for part in [
-                    &frame.meta.camera,
-                    &frame.meta.lens,
-                    &frame.meta.exposure,
-                    &frame.meta.iso,
-                    &frame.meta.aperture,
-                    &frame.meta.taken,
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    tip.push('\n');
-                    tip.push_str(part);
-                }
-                response.on_hover_text(tip);
-            }
-        });
+                    }
+                });
+            },
+        );
+        if let Some(payload) = dropped {
+            moved = Some((*payload, *index));
+        }
+        ui.add_space(SP_XS);
+    }
+
+    if let Some(index) = select_stack {
+        app.active_stack = index;
+    }
+    if let Some((frame, stack)) = moved {
+        app.move_frame_to_stack(frame, stack);
+    }
     if let Some((index, value)) = toggle {
         if let Some(frame) = app.frames.get_mut(index) {
             frame.included = value;
@@ -238,6 +281,11 @@ fn stack(app: &mut App, ui: &mut egui::Ui) {
                     ui.selectable_value(&mut app.proxy, choice, label);
                 }
             });
+    });
+    theme::control_row(ui, "Threads", |ui| {
+        let mut threads = app.threads.unwrap_or(0) as u32;
+        theme::int_slider(ui, &mut threads, 0..=64, " (0 = auto)");
+        app.threads = (threads > 0).then_some(threads as usize);
     });
     theme::control_row(ui, "Input", |ui| {
         egui::ComboBox::from_id_salt("encoding")
@@ -434,7 +482,7 @@ fn export(app: &mut App, ui: &mut egui::Ui) {
 
     ui.add(
         egui::TextEdit::singleline(&mut app.out_path)
-            .hint_text("out.exr / out.tif / out.jpg")
+            .hint_text("out.exr / out.psd / out.tif · {name} {method} {date}")
             .desired_width(f32::INFINITY),
     );
     theme::control_row(ui, "JPEG quality", |ui| {

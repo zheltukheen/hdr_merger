@@ -334,3 +334,34 @@ fn focus_stack_keeps_the_sharp_half_of_each_frame() {
         "right should come from frame b: {right}"
     );
 }
+
+#[test]
+fn streaming_exr_matches_the_in_memory_merge() {
+    let dir = workdir("stream");
+    let (w, h) = (16u32, 8u32);
+    let mut paths = Vec::new();
+    for level in [0.2f32, 0.5, 0.8] {
+        let pixels = vec![[level, level * 0.5, level * 0.25]; (w * h) as usize];
+        let path = dir.join(format!("s{level}.tif"));
+        write_frame(&path, &pixels, w, h);
+        paths.push(path);
+    }
+    let options = MergeOptions {
+        method: StackMethod::Median,
+        align: false,
+        ..Default::default()
+    };
+    let memory = merge_paths(&paths, &options, &|_, _| {}).expect("memory merge");
+
+    let out = dir.join("stream.exr");
+    let frames: Vec<hdr_core::FrameInput> = paths.iter().map(hdr_core::FrameInput::new).collect();
+    hdr_core::pipeline::merge_to_exr(&frames, &options, &out, &|_, _| {}).expect("stream merge");
+
+    let reloaded = hdr_core::io::load(&out, InputEncoding::Linear).expect("read stream exr");
+    assert_eq!((reloaded.width, reloaded.height), (w, h));
+    for index in 0..memory.image.data.len() {
+        let a = memory.image.data[index];
+        let b = reloaded.data[index];
+        assert!((a - b).abs() < 1e-4, "pixel {index}: {a} vs {b}");
+    }
+}

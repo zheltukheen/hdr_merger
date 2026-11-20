@@ -69,6 +69,9 @@ pub struct MergeOptions {
     /// Crop the result to the area that is valid in every frame.
     #[serde(default = "default_crop_to_intersection")]
     pub crop_to_intersection: bool,
+    /// Worker threads for the CPU stacker. `None` uses the global rayon pool.
+    #[serde(default)]
+    pub threads: Option<usize>,
     /// Use the wgpu stacker instead of the CPU one. Off by default: measured
     /// slower than the CPU path on 43-frame 60 MP sets (ADR 0002). Env
     /// `HDR_MERGER_GPU=1` forces it on.
@@ -90,6 +93,7 @@ impl Default for MergeOptions {
             input_encoding: InputEncoding::Auto,
             max_shift: None,
             crop_to_intersection: true,
+            threads: None,
             use_gpu: false,
         }
     }
@@ -128,11 +132,35 @@ pub struct MergeOutput {
 
 /// Merge `frames`. `progress(done, total)` is called once per decoded frame
 /// and once per stacked strip.
-pub fn merge(
+/// Everything the stacker needs, bundled so no call site carries nine arguments.
+struct StackPlan<'a> {
+    paths: &'a [Option<PathBuf>],
+    masks: &'a [Option<Mask>],
+    width: u32,
+    height: u32,
+    method: StackMethod,
+    use_gpu: bool,
+    threads: Option<usize>,
+}
+
+/// Result of the decode/cache pass, shared by the in-RAM and the streaming path.
+struct Prepared {
+    paths: Vec<Option<PathBuf>>,
+    masks: Vec<Option<Mask>>,
+    shifts: Vec<Shift>,
+    width: u32,
+    height: u32,
+    decode_ms: u64,
+    cache_ms: u64,
+    warnings: Vec<String>,
+    _cache: Cache,
+}
+
+fn prepare(
     frames: &[FrameInput],
     options: &MergeOptions,
     progress: &dyn Fn(u32, u32),
-) -> Result<MergeOutput> {
+) -> Result<Prepared> {
     if frames.is_empty() {
         return Err(HdrError::NoFrames);
     }
@@ -140,9 +168,6 @@ pub fn merge(
     let mut order: Vec<usize> = (0..frames.len()).filter(|i| *i != reference).collect();
     order.insert(0, reference);
 
-    let started = std::time::Instant::now();
-    let mut decode_ns: u128 = 0;
-    let mut cache_ns: u128 = 0;
     let cache = Cache::new()?;
     let mut shifts = vec![Shift::identity(); frames.len()];
     let mut masks: Vec<Option<Mask>> = vec![None; frames.len()];
@@ -151,6 +176,8 @@ pub fn merge(
     let mut reference_probe: Option<LinearImage> = None;
     let mut warnings = Vec::new();
     let total = frames.len() as u32;
+    let mut decode_ns: u128 = 0;
+    let mut cache_ns: u128 = 0;
 
     for (step, &index) in order.iter().enumerate() {
         let frame = &frames[index];
@@ -196,7 +223,7 @@ pub fn merge(
             Shift::identity()
         };
         if let Some(limit) = options.max_shift {
-            if shift.magnitude().unsigned_abs() > limit {
+            if shift.magnitude() > limit as i32 {
                 return Err(HdrError::ShiftTooLarge {
                     path: frame.path.clone(),
                     dx: shift.dx,
@@ -207,7 +234,7 @@ pub fn merge(
         }
         if shift.magnitude() > 2 {
             warnings.push(format!(
-                "{}: shift {:+.0},{:+.0} px (confidence {:.1})",
+                "{}: shift {:+},{:+} px (confidence {:.1})",
                 frame.path.file_name().unwrap_or_default().to_string_lossy(),
                 shift.dx,
                 shift.dy,
@@ -232,42 +259,120 @@ pub fn merge(
     }
 
     let (width, height) = size.ok_or(HdrError::NoFrames)?;
-    let stack_started = std::time::Instant::now();
-    let (image, used_gpu) = stack_cached(
-        &cache_paths,
-        &masks,
+    Ok(Prepared {
+        paths: cache_paths,
+        masks,
+        shifts,
         width,
         height,
-        options.method,
-        options.use_gpu,
-        progress,
-    )?;
-    let stack_ns = stack_started.elapsed().as_nanos();
-    let image = if options.crop_to_intersection {
-        let (x0, y0, w, h) = intersection(&shifts, width, height)
-            .ok_or_else(|| HdrError::Engine("crop left nothing: shifts exceed the frame".into()))?;
-        // The common case: identity shifts leave the frame untouched, don't
-        // copy 60 MP for nothing.
-        if (x0, y0, w, h) == (0, 0, width, height) {
-            image
-        } else {
-            crop(&image, x0, y0, w, h)
-        }
-    } else {
-        image
-    };
-    let timings = MergeTimings {
         decode_ms: (decode_ns / 1_000_000) as u64,
         cache_ms: (cache_ns / 1_000_000) as u64,
+        warnings,
+        _cache: cache,
+    })
+}
+
+/// Region every frame can fill, or the whole frame when cropping is off.
+fn output_rect(
+    options: &MergeOptions,
+    shifts: &[Shift],
+    width: u32,
+    height: u32,
+) -> Result<(u32, u32, u32, u32)> {
+    if !options.crop_to_intersection {
+        return Ok((0, 0, width, height));
+    }
+    intersection(shifts, width, height)
+        .ok_or_else(|| HdrError::Engine("crop left nothing: shifts exceed the frame".into()))
+}
+
+pub fn merge(
+    frames: &[FrameInput],
+    options: &MergeOptions,
+    progress: &dyn Fn(u32, u32),
+) -> Result<MergeOutput> {
+    let started = std::time::Instant::now();
+    let prepared = prepare(frames, options, progress)?;
+    let (width, height) = (prepared.width, prepared.height);
+    let (x0, y0, w, h) = output_rect(options, &prepared.shifts, width, height)?;
+
+    let plan = StackPlan {
+        paths: &prepared.paths,
+        masks: &prepared.masks,
+        width,
+        height,
+        method: options.method,
+        use_gpu: options.use_gpu,
+        threads: options.threads,
+    };
+    let stack_started = std::time::Instant::now();
+    let (image, used_gpu) = stack_cached(&plan, progress)?;
+    let stack_ns = stack_started.elapsed().as_nanos();
+    let image = if (x0, y0, w, h) == (0, 0, width, height) {
+        image
+    } else {
+        crop(&image, x0, y0, w, h)
+    };
+
+    Ok(MergeOutput {
+        image,
+        shifts: prepared.shifts,
+        warnings: prepared.warnings,
+        timings: MergeTimings {
+            decode_ms: prepared.decode_ms,
+            cache_ms: prepared.cache_ms,
+            stack_ms: (stack_ns / 1_000_000) as u64,
+            total_ms: started.elapsed().as_millis() as u64,
+            gpu: used_gpu,
+        },
+    })
+}
+
+/// Merge straight into an EXR on disk: the stacked pixels are written row by row
+/// and the 60 MP master never exists as one buffer in RAM.
+pub fn merge_to_exr(
+    frames: &[FrameInput],
+    options: &MergeOptions,
+    path: &Path,
+    progress: &dyn Fn(u32, u32),
+) -> Result<MergeTimings> {
+    let started = std::time::Instant::now();
+    let prepared = prepare(frames, options, progress)?;
+    let (width, height) = (prepared.width, prepared.height);
+    let (x0, y0, w, h) = output_rect(options, &prepared.shifts, width, height)?;
+
+    let plan = StackPlan {
+        paths: &prepared.paths,
+        masks: &prepared.masks,
+        width,
+        height,
+        method: options.method,
+        use_gpu: options.use_gpu,
+        threads: options.threads,
+    };
+    let mut writer = crate::exr_stream::ExrStreamWriter::create(path, w, h)?;
+    let stack_started = std::time::Instant::now();
+    let used_gpu = stack_strips(&plan, progress, |strip_y0, rows, data| {
+        for row in 0..rows {
+            let source_y = strip_y0 + row;
+            if source_y < y0 || source_y >= y0 + h {
+                continue;
+            }
+            let start = row as usize * width as usize * 3 + x0 as usize * 3;
+            let end = start + w as usize * 3;
+            writer.write_row(&data[start..end])?;
+        }
+        Ok(())
+    })?;
+    writer.finish()?;
+    let stack_ns = stack_started.elapsed().as_nanos();
+
+    Ok(MergeTimings {
+        decode_ms: prepared.decode_ms,
+        cache_ms: prepared.cache_ms,
         stack_ms: (stack_ns / 1_000_000) as u64,
         total_ms: started.elapsed().as_millis() as u64,
         gpu: used_gpu,
-    };
-    Ok(MergeOutput {
-        image,
-        shifts,
-        warnings,
-        timings,
     })
 }
 
@@ -324,38 +429,67 @@ pub fn merge_paths(
 fn write_cache(path: &Path, image: &LinearImage, shift: Shift) -> Result<()> {
     let width = image.width as i32;
     let height = image.height as i32;
-    let mut writer = BufWriter::with_capacity(1 << 20, File::create(path)?);
-    let mut row: Vec<u8> = Vec::with_capacity(image.width as usize * 3 * 2);
+    let mut writer = BufWriter::with_capacity(4 << 20, File::create(path)?);
+    let mut block: Vec<u8> = vec![0; image.width as usize * 3 * 2];
+    // A shifted frame samples x + dx, so the loop body differs; hoist the branch
+    // out instead of testing it 60 million times.
+    let shifted = shift.magnitude() != 0;
     for y in 0..height {
-        row.clear();
-        for x in 0..width {
-            let source = if shift.magnitude() == 0 {
-                image.pixel(x as u32, y as u32)
-            } else {
-                // `shift` is the content offset: content at x lives at x+dx.
-                let sx = (x + shift.dx).clamp(0, width - 1) as u32;
+        if shifted {
+            for (x, chunk) in block.chunks_exact_mut(6).enumerate() {
+                let sx = (x as i32 + shift.dx).clamp(0, width - 1) as u32;
                 let sy = (y + shift.dy).clamp(0, height - 1) as u32;
-                image.pixel(sx, sy)
-            };
-            for channel in source {
-                row.extend_from_slice(&f16::from_f32(channel).to_bits().to_le_bytes());
+                let base = (sy as usize * width as usize + sx as usize) * 3;
+                write_pixel(chunk, &image.data[base..base + 3]);
+            }
+        } else {
+            let row = y as usize * width as usize * 3;
+            for (x, chunk) in block.chunks_exact_mut(6).enumerate() {
+                let base = row + x * 3;
+                write_pixel(chunk, &image.data[base..base + 3]);
             }
         }
-        writer.write_all(&row)?;
+        writer.write_all(&block)?;
     }
     writer.flush()?;
     Ok(())
 }
 
-fn stack_cached(
-    paths: &[Option<PathBuf>],
-    masks: &[Option<Mask>],
-    width: u32,
-    height: u32,
-    method: StackMethod,
-    use_gpu: bool,
+#[inline]
+fn write_pixel(chunk: &mut [u8], rgb: &[f32]) {
+    chunk[0..2].copy_from_slice(&f16::from_f32(rgb[0]).to_bits().to_le_bytes());
+    chunk[2..4].copy_from_slice(&f16::from_f32(rgb[1]).to_bits().to_le_bytes());
+    chunk[4..6].copy_from_slice(&f16::from_f32(rgb[2]).to_bits().to_le_bytes());
+}
+
+fn stack_cached(plan: &StackPlan<'_>, progress: &dyn Fn(u32, u32)) -> Result<(LinearImage, bool)> {
+    let mut out = LinearImage::new(plan.width, plan.height);
+    let row_values = plan.width as usize * 3;
+    let used_gpu = stack_strips(plan, progress, |strip_y0, rows, data| {
+        let start = strip_y0 as usize * row_values;
+        let _ = rows;
+        out.data[start..start + data.len()].copy_from_slice(data);
+        Ok(())
+    })?;
+    Ok((out, used_gpu))
+}
+
+/// The strip loop shared by the in-RAM and the streaming path. `emit` gets the
+/// full-width strip of stacked values plus its first row index.
+fn stack_strips(
+    plan: &StackPlan<'_>,
     progress: &dyn Fn(u32, u32),
-) -> Result<(LinearImage, bool)> {
+    mut emit: impl FnMut(u32, u32, &[f32]) -> Result<()>,
+) -> Result<bool> {
+    let StackPlan {
+        paths,
+        masks,
+        width,
+        height,
+        method,
+        use_gpu,
+        threads,
+    } = *plan;
     let count = paths.len();
     let row_bytes = width as usize * 3 * 2;
     let mut readers: Vec<File> = Vec::with_capacity(count);
@@ -366,13 +500,19 @@ fn stack_cached(
         readers.push(File::open(path)?);
     }
     let mut buffers: Vec<Vec<u8>> = vec![Vec::new(); count];
-    let mut out = LinearImage::new(width, height);
     let row_pixels = width as usize;
+    let pool = threads.filter(|threads| *threads > 0).and_then(|threads| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .ok()
+    });
 
-    // A set with any painted mask stays on the CPU: shipping 30 MB of mask
-    // indices per strip to save a few hundred ms is not a trade worth making.
     #[cfg(feature = "gpu")]
-    let gpu = if (use_gpu || crate::gpu::enabled_by_env()) && masks.iter().all(Option::is_none) {
+    let gpu = if (use_gpu || crate::gpu::enabled_by_env())
+        && method != StackMethod::Focus
+        && masks.iter().all(Option::is_none)
+    {
         crate::gpu::GpuStacker::new()
     } else {
         None
@@ -381,9 +521,6 @@ fn stack_cached(
     let gpu: Option<()> = None;
     let mut used_gpu = false;
 
-    // A GPU strip has to fit one storage binding (128 MB on downlevel adapters),
-    // so the tile shrinks when the stacker is enabled: 64 rows of a 5496x3 f16
-    // strip times 64 frames is ~91 MB.
     let strip_rows = if gpu.is_some() { 64 } else { STRIP_ROWS };
     let strips = height.div_ceil(strip_rows);
 
@@ -397,18 +534,11 @@ fn stack_cached(
             reader.read_exact(buffer)?;
         }
 
-        let start = y0 as usize * row_pixels * 3;
-        let end = start + rows * row_pixels * 3;
+        let mut values = vec![0.0f32; rows * row_pixels * 3];
 
         if method == StackMethod::Focus {
-            focus_strip(
-                &buffers,
-                masks,
-                &mut out.data[start..end],
-                y0 as usize,
-                rows,
-                row_pixels,
-            );
+            focus_strip(&buffers, masks, &mut values, y0 as usize, rows, row_pixels);
+            emit(y0, rows as u32, &values)?;
             progress(strip as u32 + 1, strips);
             continue;
         }
@@ -422,46 +552,55 @@ fn stack_cached(
                 }
                 let pixels = rows * row_pixels;
                 let (code, param) = method.gpu_code();
-                if let Some(values) = stacker.stack(&packed, count, pixels, code, param) {
-                    out.data[start..end].copy_from_slice(&values);
+                if let Some(stacked) = stacker.stack(&packed, count, pixels, code, param) {
+                    values.copy_from_slice(&stacked);
                     used_gpu = true;
+                    emit(y0, rows as u32, &values)?;
                     progress(strip as u32 + 1, strips);
                     continue;
                 }
             }
         }
 
-        out.data[start..end]
-            .par_chunks_mut(row_pixels * 3)
-            .enumerate()
-            .for_each(|(row, row_out)| {
-                let y = y0 as usize + row;
-                let mut values: Vec<f32> = Vec::with_capacity(count);
-                for x in 0..row_pixels {
-                    let mask_index = y * row_pixels + x;
-                    for channel in 0..3 {
-                        values.clear();
-                        for (index, buffer) in buffers.iter().enumerate() {
-                            if let Some(mask) = &masks[index] {
-                                if mask.excluded(mask_index) {
-                                    continue;
+        let process = |slice: &mut [f32]| {
+            slice
+                .par_chunks_mut(row_pixels * 3)
+                .enumerate()
+                .for_each(|(row, row_out)| {
+                    let y = y0 as usize + row;
+                    let mut values: Vec<f32> = Vec::with_capacity(count);
+                    for x in 0..row_pixels {
+                        let mask_index = y * row_pixels + x;
+                        for channel in 0..3 {
+                            values.clear();
+                            for (index, buffer) in buffers.iter().enumerate() {
+                                if let Some(mask) = &masks[index] {
+                                    if mask.excluded(mask_index) {
+                                        continue;
+                                    }
                                 }
+                                let offset = (row * row_pixels + x) * 6 + channel * 2;
+                                let bits = u16::from_le_bytes([buffer[offset], buffer[offset + 1]]);
+                                values.push(f16::from_bits(bits).to_f32());
                             }
-                            let offset = (row * row_pixels + x) * 6 + channel * 2;
-                            let bits = u16::from_le_bytes([buffer[offset], buffer[offset + 1]]);
-                            values.push(f16::from_bits(bits).to_f32());
+                            row_out[x * 3 + channel] = if values.is_empty() {
+                                0.0
+                            } else {
+                                method.pick_unsorted(&mut values)
+                            };
                         }
-                        row_out[x * 3 + channel] = if values.is_empty() {
-                            0.0
-                        } else {
-                            method.pick_unsorted(&mut values)
-                        };
                     }
-                }
-            });
+                });
+        };
+        if let Some(pool) = &pool {
+            pool.install(|| process(&mut values));
+        } else {
+            process(&mut values);
+        }
+        emit(y0, rows as u32, &values)?;
         progress(strip as u32 + 1, strips);
     }
-    Ok((out, used_gpu))
+    Ok(used_gpu)
 }
 
 /// Focus stacking for one strip: the sharpest frame per pixel wins.

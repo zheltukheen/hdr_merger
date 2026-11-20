@@ -376,6 +376,15 @@ mod tests {
         let _ = ctx.run(input, |ctx| app.ui(ctx));
     }
 
+    fn dummy_frame(index: usize) -> app::Frame {
+        app::Frame {
+            path: std::path::PathBuf::from(format!("/tmp/frame{index}.tif")),
+            meta: crate::meta::probe(std::path::Path::new("/nonexistent")),
+            mask: None,
+            included: true,
+        }
+    }
+
     fn sample_tiff(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
         let mut image = hdr_core::LinearImage::filled(32, 24, [0.3, 0.35, 0.4]);
         image.set_pixel(4, 4, [1.0, 1.0, 1.0]);
@@ -454,6 +463,14 @@ mod tests {
         let ctx = test_ctx();
         let mut app = App::with_context(&ctx);
         app.add_paths(vec![a, b]);
+        // Adding a batch kicks off automatic grouping; let it finish first.
+        for _ in 0..300 {
+            render(&ctx, &mut app);
+            if !app.busy() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         app.auto_exposure = false;
         app.exposure_ev = 4.0;
         app.start_preview();
@@ -489,6 +506,29 @@ mod tests {
         assert_eq!(app.active_preset(), app::Preset::LightPaintInterior);
         app.tone.saturation = 0.42;
         assert_eq!(app.active_preset(), app::Preset::Custom);
+    }
+
+    #[test]
+    fn moving_a_frame_between_stacks_updates_both_sides() {
+        let ctx = test_ctx();
+        let mut app = App::with_context(&ctx);
+        app.stacks = vec![
+            app::Stack {
+                name: "A".into(),
+                frames: vec![0, 1, 2],
+                reason: "start".into(),
+            },
+            app::Stack {
+                name: "B".into(),
+                frames: vec![3],
+                reason: "gap".into(),
+            },
+        ];
+        app.frames = (0..4).map(dummy_frame).collect();
+
+        app.move_frame_to_stack(1, 1);
+        assert_eq!(app.stacks[0].frames, vec![0, 2]);
+        assert_eq!(app.stacks[1].frames, vec![1, 3]);
     }
 
     #[test]

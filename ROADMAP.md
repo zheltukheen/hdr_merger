@@ -56,6 +56,9 @@ Goal was: no frame is thrown away because someone walked through it.
       name falls back to "Custom" the moment a control stops matching
 - [x] Focus stacking mode: per pixel, keep the sharpest frame (Laplacian
       response over a 5x5 window, mask-aware)
+- [x] Automatic grouping of a whole shoot into stacks (EXIF time, exposure
+      triple, scene similarity on 96 px thumbnails), gallery with drag between
+      stacks, include/exclude and remove from the context menu
 - [ ] Batch queue (many recipes, one run)
 - [ ] Before / after split against the reference frame
 
@@ -88,9 +91,14 @@ one to attack — see the GPU result below.
       — [docs/adr/0002-gpu-stacking.md](docs/adr/0002-gpu-stacking.md)
 - [ ] Revisit GPU only with a design that removes the per-strip upload and
       readback (fused decode→cache, or histogram fusion)
-- [ ] Faster decode and cache — 31–38 % of the run, no algorithmic risk
+- [x] Cache writer: shift branch hoisted out of the pixel loop, block writes,
+      4 MB buffer — decode+cache 6.4 s → 5.7 s
+- [x] Streaming EXR export: strips go straight to disk, no 240 MB master in RAM
+- [x] Thread-count control, memory estimate, filename patterns (`{name}`,
+      `{method}`, `{date}`)
+- [ ] Decode straight at proxy size (decode is I/O-bound now)
 - [ ] SIMD selection for the CPU path (fixed N)
-- [ ] Streaming EXR export (no full master in RAM)
+- [x] Streaming EXR export (no full master in RAM)
 - [ ] Signed/notarised macOS builds, Windows installer
 - [ ] UI localisation (en/ru)
 - [ ] Dark-frame subtraction (StarStaX parity) — backlog unless requested

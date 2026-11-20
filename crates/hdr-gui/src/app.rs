@@ -10,6 +10,7 @@ use std::thread;
 use eframe::egui;
 use egui::TextureHandle;
 use hdr_core::deghost::{detect_movers, DeghostOptions};
+use hdr_core::grouping::{group_paths, Group, GroupOptions};
 use hdr_core::io::InputEncoding;
 use hdr_core::recipe::{ExportSettings, Recipe, RecipeFrame};
 use hdr_core::{
@@ -203,6 +204,13 @@ pub struct MaskSnapshot {
     pub mask: Option<Mask>,
 }
 
+/// One detected set: frames that belong to the same stack.
+pub struct Stack {
+    pub name: String,
+    pub frames: Vec<usize>,
+    pub reason: String,
+}
+
 pub struct Frame {
     pub path: PathBuf,
     pub meta: Meta,
@@ -246,6 +254,7 @@ pub enum JobKind {
     Export,
     Layers,
     Deghost,
+    Group,
 }
 
 pub enum JobMsg {
@@ -253,6 +262,7 @@ pub enum JobMsg {
     Preview(Box<MergeOutput>),
     Exported(PathBuf),
     Deghost(Vec<(usize, Option<Mask>)>),
+    Groups(Vec<Group>),
     Failed(String),
 }
 
@@ -271,6 +281,8 @@ pub enum StatusLevel {
 
 pub struct App {
     pub frames: Vec<Frame>,
+    pub stacks: Vec<Stack>,
+    pub active_stack: usize,
     pub selected: usize,
     pub sort_by: SortBy,
 
@@ -296,6 +308,7 @@ pub struct App {
     pub exposure_ev: f32,
     pub target: f32,
 
+    pub threads: Option<usize>,
     pub deghost_threshold: f32,
     pub tool: Tool,
     pub brush: f32,
@@ -343,6 +356,8 @@ impl App {
         theme::set_dark(ctx, settings.theme == Theme::Dark);
         Self {
             frames: Vec::new(),
+            stacks: Vec::new(),
+            active_stack: 0,
             selected: 0,
             sort_by: SortBy::CaptureTime,
             method: MethodChoice::Median,
@@ -365,6 +380,7 @@ impl App {
             auto_exposure: true,
             exposure_ev: 0.0,
             target: 0.55,
+            threads: None,
             deghost_threshold: 0.15,
             tool: Tool::Inspect,
             brush: 28.0,
@@ -408,6 +424,7 @@ impl App {
             Some(JobKind::Export) => "Export",
             Some(JobKind::Layers) => "Layers",
             Some(JobKind::Deghost) => "Detect movers",
+            Some(JobKind::Group) => "Grouping",
             None => "",
         }
     }
@@ -442,7 +459,8 @@ impl App {
             input_encoding: self.input_encoding,
             max_shift: self.shift_guard.then_some(self.max_shift),
             crop_to_intersection: self.crop,
-            use_gpu: true,
+            use_gpu: false,
+            threads: self.threads,
         }
     }
 
@@ -462,13 +480,54 @@ impl App {
         options
     }
 
+    /// Expand `{name}`, `{method}` and `{date}` in the export path.
+    pub fn resolved_output_path(&self) -> PathBuf {
+        let raw = self.out_path.trim();
+        let name = self
+            .frames
+            .first()
+            .map(|frame| frame.name())
+            .unwrap_or_else(|| "hdr".to_owned());
+        let date = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let expanded = raw
+            .replace("{name}", &name)
+            .replace(
+                "{method}",
+                &self.method.label().to_lowercase().replace(' ', "-"),
+            )
+            .replace("{date}", &date.to_string());
+        PathBuf::from(expanded)
+    }
+
+    /// Rough peak cost of stacking the included frames: one f16 copy each.
+    pub fn cache_estimate_bytes(&self) -> u64 {
+        let pixels: u64 = self
+            .frames
+            .iter()
+            .filter(|frame| frame.included)
+            .map(|frame| frame.meta.width as u64 * frame.meta.height as u64)
+            .sum();
+        pixels * 3 * 2
+    }
+
     pub fn frame_inputs(&self) -> Vec<FrameInput> {
+        let allowed = self
+            .stacks
+            .get(self.active_stack)
+            .map(|stack| stack.frames.clone())
+            .filter(|frames| !frames.is_empty());
         self.frames
             .iter()
-            .filter(|f| f.included)
-            .map(|f| FrameInput {
-                path: f.path.clone(),
-                mask: f.mask.clone(),
+            .enumerate()
+            .filter(|(index, frame)| {
+                frame.included && allowed.as_ref().map_or(true, |list| list.contains(index))
+            })
+            .map(|(_, frame)| FrameInput {
+                path: frame.path.clone(),
+                mask: frame.mask.clone(),
             })
             .collect()
     }
@@ -498,6 +557,9 @@ impl App {
                 StatusLevel::Info,
                 format!("{} frame(s) loaded", self.frames.len()),
             );
+            if self.stacks.is_empty() && self.frames.len() > 1 {
+                self.start_grouping();
+            }
         } else {
             self.set_status(StatusLevel::Info, "nothing new to add");
         }
@@ -653,7 +715,7 @@ impl App {
         if self.frames.is_empty() || self.busy() {
             return;
         }
-        let out = PathBuf::from(self.out_path.trim());
+        let out = self.resolved_output_path();
         if out.as_os_str().is_empty() {
             self.set_status(StatusLevel::Error, "set an output path first");
             return;
@@ -667,6 +729,38 @@ impl App {
         let controls = self.tone.clone();
         let edge = self.out_edge_on.then_some(self.out_edge);
         let quality = self.jpeg_quality;
+        let stream_exr = matches!(
+            out.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_ascii_lowercase())
+                .as_deref(),
+            Some("exr")
+        );
+        if stream_exr {
+            let inputs = self.frame_inputs();
+            let options = self.merge_options(None);
+            let target_path = out.clone();
+            self.set_status(StatusLevel::Busy, "streaming EXR…");
+            self.spawn(JobKind::Export, move |tx| {
+                let result = hdr_core::pipeline::merge_to_exr(
+                    &inputs,
+                    &options,
+                    &target_path,
+                    &|done, total| {
+                        let _ = tx.send(JobMsg::Progress(done, total));
+                    },
+                );
+                match result {
+                    Ok(_) => {
+                        let _ = tx.send(JobMsg::Exported(target_path));
+                    }
+                    Err(error) => {
+                        let _ = tx.send(JobMsg::Failed(error.to_string()));
+                    }
+                }
+            });
+            return;
+        }
         let layers = matches!(
             out.extension()
                 .and_then(|ext| ext.to_str())
@@ -817,6 +911,24 @@ impl App {
                     );
                     finished = true;
                 }
+                JobMsg::Groups(groups) => {
+                    self.stacks = groups
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, group)| Stack {
+                            name: format!("Stack {}", index + 1),
+                            frames: group.frames,
+                            reason: group.reason,
+                        })
+                        .collect();
+                    self.active_stack = 0;
+                    let masked: usize = self.frames.iter().filter(|f| f.included).count();
+                    self.set_status(
+                        StatusLevel::Ok,
+                        format!("{} stack(s) from {masked} frame(s)", self.stacks.len()),
+                    );
+                    finished = true;
+                }
                 JobMsg::Exported(path) => {
                     self.set_status(StatusLevel::Ok, format!("saved {}", path.display()));
                     finished = true;
@@ -858,6 +970,45 @@ impl App {
         let color = egui::ColorImage::from_rgb(size, &preview.display);
         self.texture = Some(ctx.load_texture("preview", color, egui::TextureOptions::LINEAR));
         self.histogram = Some(histogram(&preview.display));
+    }
+
+    // ---- stacks --------------------------------------------------------
+
+    /// Group the whole shoot in the background: time gaps, exposure changes and
+    /// scene changes each start a new stack.
+    pub fn start_grouping(&mut self) {
+        if self.frames.is_empty() || self.busy() {
+            return;
+        }
+        let paths: Vec<PathBuf> = self.frames.iter().map(|frame| frame.path.clone()).collect();
+        let options = GroupOptions::default();
+        self.set_status(StatusLevel::Busy, "grouping frames…");
+        self.spawn(JobKind::Group, move |tx| {
+            let result = group_paths(&paths, &options, &|done, total| {
+                let _ = tx.send(JobMsg::Progress(done, total));
+            });
+            match result {
+                Ok(groups) => {
+                    let _ = tx.send(JobMsg::Groups(groups));
+                }
+                Err(error) => {
+                    let _ = tx.send(JobMsg::Failed(error.to_string()));
+                }
+            }
+        });
+    }
+
+    pub fn move_frame_to_stack(&mut self, frame: usize, stack: usize) {
+        if stack >= self.stacks.len() {
+            return;
+        }
+        for existing in &mut self.stacks {
+            existing.frames.retain(|index| *index != frame);
+        }
+        self.stacks[stack].frames.push(frame);
+        self.stacks[stack].frames.sort_unstable();
+        self.stacks.retain(|stack| !stack.frames.is_empty());
+        self.active_stack = self.active_stack.min(self.stacks.len().saturating_sub(1));
     }
 
     // ---- settings and updates -----------------------------------------
