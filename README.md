@@ -80,8 +80,9 @@ Encoding is inferred per file: 8-bit means sRGB display values, 16-bit and
 * `crates/hdr-gui` — `hdr-merger-gui`, an [egui](https://github.com/emilk/egui) app.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the data flow and the invariants,
-[ROADMAP.md](ROADMAP.md) for what is next, [AGENTS.md](AGENTS.md) for how to work
-on the repo.
+[docs/UX-SPEC.md](docs/UX-SPEC.md) for every setting and control the app is meant
+to expose (and where each idea comes from), [ROADMAP.md](ROADMAP.md) for what is
+next, [AGENTS.md](AGENTS.md) for how to work on the repo.
 
 ## License
 
