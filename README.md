@@ -57,9 +57,15 @@ hdr-merger merge frames/*.tif -o preview.jpg --max-dim 2000
 hdr-merger-gui
 ```
 
-Add a folder, pick the stack method, press **Preview** (proxy, fast), paint masks
-on the frames that need it, then **Export full**. The UI is a thin shell over the
-same engine the CLI uses — no second implementation to drift.
+Drop a folder (or a batch of files) anywhere in the window, pick the stack
+method, press **Preview** (proxy, fast), paint masks on the frames that need it,
+then **Export full**.
+
+Everything numeric is typed as well as dragged: slider + value box on every
+setting. Recipes (`*.hdrm.json`) store the frames, the masks and every setting,
+so a merge can be re-opened and re-rendered later. The look is a single token
+file — see [docs/DESIGN.md](docs/DESIGN.md). The UI is a thin shell over the same
+engine the CLI uses — no second implementation to drift.
 
 ## Input formats
 

@@ -16,29 +16,31 @@ in the order that unlocks real editing.
 - [x] Session controls: method picker, percentile slider, align toggle, brush,
       auto exposure, output path
 
-## v0.2 — "controls that do the work"
+## v0.2 — shipped
 
-Goal: every number in a stack is reachable, typed and remembered.
+Goal was: every number in a stack is reachable, typed and remembered.
 
-**Settings & controls**
+- [x] Typed value entry on every numeric setting (slider + DragValue)
+- [x] Stack panel: method picker, percentile, trimmed count, reference frame,
+      max-shift guard, crop-to-intersection, preview proxy, input encoding
+- [x] Sources panel: capture-time / name sort, include-exclude per frame, mask
+      badge, per-frame size, EXIF in the row tooltip
+- [x] Masks: brush + eraser, softness, size (`[` `]`), red exclusion overlay,
+      filmstrip with the selected frame
+- [x] Tone panel: auto or manual exposure, target luminance, ACES / Reinhard /
+      Hable / linear
+- [x] Export: output path, optional long-edge resize, background export
+- [x] Recipe file `*.hdrm.json`: frames, masks, every stack and tone setting,
+      machine-readable, one button to save or load
+- [x] View: scroll zoom, pan, fit/100 %, live luminance histogram, frame footer
+- [x] Empty state: drop target, path field, what the app expects from a set
+- [x] Design system: one token file, one control set, one layout
+      ([docs/DESIGN.md](docs/DESIGN.md))
+- [x] Headless UI smoke tests: the shell renders with and without frames
 
-- [ ] Typed value entry on every slider (right-click → number), arrow nudge,
-      double-click reset — darktable's model
-- [ ] Stack panel completes: trimmed count, reference frame, max-shift guard,
-      crop-to-intersection, proxy size, thread count
-- [ ] Sources panel: capture-time sort, EXIF inspector, include/exclude per
-      frame, memory/disk estimate before stacking
-- [ ] Export panel: resize (long edge), filename pattern, output folder picker,
-      quality slider
-- [ ] Project/recipe file `*.hdrm.json` (frames, masks, every setting),
-      versioned schema + `--recipe` in the CLI
-- [ ] Native RAW decode (CR2/CR3/NEF/ARW/DNG) behind a `raw` feature, so the
-      external converter disappears
-- [ ] Fast proxy decode: read frames directly at proxy resolution for preview
-
-**Acceptance**: a user can load a folder, set the method and crop, preview,
-export at a chosen size, save the recipe, reopen it next week and get the same
-result byte for byte.
+Left over from this phase (moved to v0.3): thread-count control, memory
+estimate before stacking, filename pattern, JPEG quality slider, native RAW,
+decode-at-proxy.
 
 ## v0.3 — "masks and deghosting"
 
