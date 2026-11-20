@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use hdr_core::io::InputEncoding;
+use hdr_core::recipe::{ExportSettings, Recipe, RecipeFrame};
 use hdr_core::{
     merge, merge_paths, Curve, FrameInput, Mask, MergeOptions, StackMethod, ToneMapOptions,
 };
@@ -18,7 +19,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Merge frames into one HDR image.
-    Merge(MergeArgs),
+    Merge(Box<MergeArgs>),
     /// Print image facts.
     Info { file: PathBuf },
     /// List stack methods.
@@ -49,6 +50,18 @@ struct MergeArgs {
     /// Longest edge of the result (proxy / preview).
     #[arg(long)]
     max_dim: Option<u32>,
+
+    /// Refuse a frame whose estimated shift exceeds this many pixels (|dx|+|dy|).
+    #[arg(long)]
+    max_shift: Option<u32>,
+
+    /// Keep the full frame instead of cropping to the area valid in every frame.
+    #[arg(long)]
+    no_crop: bool,
+
+    /// Write a recipe JSON describing this run.
+    #[arg(long)]
+    save_recipe: Option<PathBuf>,
 
     /// Exposure in EV, or `auto`.
     #[arg(long, default_value = "auto")]
@@ -83,7 +96,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
-        Command::Merge(args) => merge_command(args),
+        Command::Merge(args) => merge_command(*args),
         Command::Info { file } => {
             let image = hdr_core::io::load(&file, InputEncoding::Auto)?;
             println!(
@@ -120,6 +133,8 @@ fn merge_command(args: MergeArgs) -> Result<()> {
         reference: args.reference,
         max_dim: args.max_dim,
         input_encoding: parse_input_encoding(&args.input)?,
+        max_shift: args.max_shift,
+        crop_to_intersection: !args.no_crop,
     };
     let curve = parse_curve(&args.curve)?;
 
@@ -167,6 +182,30 @@ fn merge_command(args: MergeArgs) -> Result<()> {
     );
 
     hdr_core::io::save(&args.out, &merged.image, &tonemap)?;
+
+    if let Some(path) = &args.save_recipe {
+        let recipe = Recipe {
+            export: ExportSettings {
+                path: Some(args.out.clone()),
+                max_edge: None,
+            },
+            ..Recipe::new(
+                frames
+                    .into_iter()
+                    .map(|frame| RecipeFrame {
+                        path: frame.path,
+                        included: true,
+                        mask: frame.mask,
+                    })
+                    .collect(),
+                options,
+                tonemap,
+            )
+        };
+        recipe.save(path)?;
+        eprintln!("recipe: {}", path.display());
+    }
+
     println!("{}", args.out.display());
     Ok(())
 }

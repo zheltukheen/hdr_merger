@@ -31,6 +31,17 @@ pub enum HdrError {
         got_h: u32,
     },
 
+    #[error(
+        "frame {} drifted {dx},{dy} px, limit {limit}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    )]
+    ShiftTooLarge {
+        path: PathBuf,
+        dx: i32,
+        dy: i32,
+        limit: u32,
+    },
+
     #[error("invalid parameter: {0}")]
     Invalid(String),
 

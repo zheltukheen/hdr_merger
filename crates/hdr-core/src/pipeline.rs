@@ -62,6 +62,17 @@ pub struct MergeOptions {
     /// Longest edge of the result. `None` keeps full resolution.
     pub max_dim: Option<u32>,
     pub input_encoding: InputEncoding,
+    /// Reject a frame whose estimated shift is longer than this many pixels
+    /// (`|dx| + |dy|`). `None` accepts any drift.
+    #[serde(default)]
+    pub max_shift: Option<u32>,
+    /// Crop the result to the area that is valid in every frame.
+    #[serde(default = "default_crop_to_intersection")]
+    pub crop_to_intersection: bool,
+}
+
+fn default_crop_to_intersection() -> bool {
+    true
 }
 
 impl Default for MergeOptions {
@@ -72,6 +83,8 @@ impl Default for MergeOptions {
             reference: None,
             max_dim: None,
             input_encoding: InputEncoding::Auto,
+            max_shift: None,
+            crop_to_intersection: true,
         }
     }
 }
@@ -148,6 +161,16 @@ pub fn merge(
         } else {
             Shift::identity()
         };
+        if let Some(limit) = options.max_shift {
+            if shift.magnitude().unsigned_abs() > limit {
+                return Err(HdrError::ShiftTooLarge {
+                    path: frame.path.clone(),
+                    dx: shift.dx,
+                    dy: shift.dy,
+                    limit,
+                });
+            }
+        }
         if shift.magnitude() > 2 {
             warnings.push(format!(
                 "{}: shift {:+.0},{:+.0} px (confidence {:.1})",
@@ -181,11 +204,64 @@ pub fn merge(
         options.method,
         progress,
     )?;
+    let image = if options.crop_to_intersection {
+        let (x0, y0, w, h) = intersection(&shifts, width, height)
+            .ok_or_else(|| HdrError::Engine("crop left nothing: shifts exceed the frame".into()))?;
+        // The common case: identity shifts leave the frame untouched, don't
+        // copy 60 MP for nothing.
+        if (x0, y0, w, h) == (0, 0, width, height) {
+            image
+        } else {
+            crop(&image, x0, y0, w, h)
+        }
+    } else {
+        image
+    };
     Ok(MergeOutput {
         image,
         shifts,
         warnings,
     })
+}
+
+/// Region of the stacked frame that every input frame can fill.
+///
+/// The cache writer samples `x + dx` from a frame, so output column `x` is
+/// valid while `0 <= x + dx < width`; the same holds for rows. Returns
+/// `(x0, y0, width, height)` or `None` when the rectangles do not overlap.
+fn intersection(shifts: &[Shift], width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+    let mut left = 0i64;
+    let mut top = 0i64;
+    let mut right = i64::from(width);
+    let mut bottom = i64::from(height);
+    for shift in shifts {
+        left = left.max(-i64::from(shift.dx));
+        right = right.min(i64::from(width) - i64::from(shift.dx));
+        top = top.max(-i64::from(shift.dy));
+        bottom = bottom.min(i64::from(height) - i64::from(shift.dy));
+    }
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some((
+        left as u32,
+        top as u32,
+        (right - left) as u32,
+        (bottom - top) as u32,
+    ))
+}
+
+/// Copy one rectangle out of `image`, re-packed with no padding.
+fn crop(image: &LinearImage, x0: u32, y0: u32, width: u32, height: u32) -> LinearImage {
+    let mut out = LinearImage::new(width, height);
+    let row_values = width as usize * 3;
+    for row in 0..height as usize {
+        let source = (y0 as usize + row) * image.width as usize * 3 + x0 as usize * 3;
+        let target = row * row_values;
+        out.data[target..target + row_values]
+            .copy_from_slice(&image.data[source..source + row_values]);
+    }
+    out
 }
 
 /// Convenience for callers that only have paths.
@@ -438,5 +514,129 @@ mod tests {
         )
         .unwrap();
         assert!(seen.load(Ordering::Relaxed) > 0);
+    }
+
+    /// Deterministic texture: a periodic pattern would make the correlation
+    /// ambiguous and the test would be about luck, not about the crop.
+    fn textured(width: u32, height: u32) -> LinearImage {
+        let mut seed = 0x2468_ace1u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((seed >> 8) & 0xffff) as f32 / 65535.0
+        };
+        let mut image = LinearImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let value = next();
+                image.set_pixel(x, y, [value, value * 0.5, value * 0.2]);
+            }
+        }
+        image
+    }
+
+    /// Content offset: the pixel that sits at `(x, y)` in `image` is written
+    /// at `(x + dx, y + dy)`.
+    fn shifted_by(image: &LinearImage, dx: i32, dy: i32) -> LinearImage {
+        let mut out = LinearImage::new(image.width, image.height);
+        for y in 0..image.height as i32 {
+            for x in 0..image.width as i32 {
+                let sx = (x - dx).clamp(0, image.width as i32 - 1) as u32;
+                let sy = (y - dy).clamp(0, image.height as i32 - 1) as u32;
+                out.set_pixel(x as u32, y as u32, image.pixel(sx, sy));
+            }
+        }
+        out
+    }
+
+    fn two_frames(dir: &Path, base: LinearImage, moved: LinearImage) -> Vec<PathBuf> {
+        let a = dir.join("a.tif");
+        let b = dir.join("b.tif");
+        io::save(&a, &base, &linear_tonemap()).unwrap();
+        io::save(&b, &moved, &linear_tonemap()).unwrap();
+        vec![a, b]
+    }
+
+    #[test]
+    fn max_shift_rejects_a_frame_that_drifted_too_far() {
+        let dir = temp_dir("max-shift");
+        let base = textured(64, 64);
+        let moved = shifted_by(&base, 6, -4);
+        let paths = two_frames(&dir, base, moved);
+
+        let options = MergeOptions {
+            method: StackMethod::Mean,
+            max_shift: Some(5),
+            ..Default::default()
+        };
+        let error = merge_paths(&paths, &options, &|_, _| {}).unwrap_err();
+        match error {
+            HdrError::ShiftTooLarge {
+                path,
+                dx,
+                dy,
+                limit,
+            } => {
+                assert_eq!((dx, dy, limit), (6, -4, 5));
+                assert_eq!(path.file_name().unwrap(), "b.tif");
+            }
+            other => panic!("expected ShiftTooLarge, got {other:?}"),
+        }
+
+        // The same pair is accepted once the guard is generous enough.
+        let relaxed = MergeOptions {
+            max_shift: Some(50),
+            ..options
+        };
+        assert!(merge_paths(&paths, &relaxed, &|_, _| {}).is_ok());
+    }
+
+    #[test]
+    fn crop_keeps_the_region_valid_in_every_frame() {
+        let dir = temp_dir("crop");
+        let (w, h) = (64u32, 64u32);
+        let base = textured(w, h);
+        let moved = shifted_by(&base, 3, 2);
+        let paths = two_frames(&dir, base.clone(), moved);
+
+        let options = MergeOptions {
+            method: StackMethod::Mean,
+            ..Default::default()
+        };
+        let merged = merge_paths(&paths, &options, &|_, _| {}).unwrap();
+        assert_eq!((merged.shifts[1].dx, merged.shifts[1].dy), (3, 2));
+
+        // Shift (3, 2) leaves the last three columns and two rows unreachable.
+        assert_eq!((merged.image.width, merged.image.height), (w - 3, h - 2));
+        assert_eq!(merged.image.data.len() as u32, (w - 3) * (h - 2) * 3);
+
+        // The crop origin is the reference frame's own (0, 0): the kept
+        // pixels are the unshifted ones, not the shifted copy.
+        for (x, y) in [(0, 0), (31, 30), (w - 4, h - 3)] {
+            let got = merged.image.pixel(x, y);
+            let want = base.pixel(x, y);
+            assert!(
+                (got[0] - want[0]).abs() < 2e-3,
+                "pixel {x},{y}: {got:?} vs {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn crop_can_be_disabled() {
+        let dir = temp_dir("no-crop");
+        let (w, h) = (64u32, 64u32);
+        let base = textured(w, h);
+        let moved = shifted_by(&base, 3, 2);
+        let paths = two_frames(&dir, base, moved);
+
+        let options = MergeOptions {
+            method: StackMethod::Mean,
+            crop_to_intersection: false,
+            ..Default::default()
+        };
+        let merged = merge_paths(&paths, &options, &|_, _| {}).unwrap();
+        assert_eq!((merged.image.width, merged.image.height), (w, h));
+        assert_eq!(merged.image.data.len() as u32, w * h * 3);
+        assert_eq!((merged.shifts[1].dx, merged.shifts[1].dy), (3, 2));
     }
 }
